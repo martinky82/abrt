@@ -620,6 +620,7 @@ static char *get_dev_log_socket_inode(void)
     long inode_pos = 0;
     while (feof(fpnu) == 0 && ferror(fpnu) == 0)
     {
+        /* Read fields delimited by ' ' */
         int field = 0;
         while ((c = fgetc(fpnu)) != EOF && c != '\n')
         {
@@ -627,23 +628,27 @@ static char *get_dev_log_socket_inode(void)
                 continue;
 
             ++field;
+            if (field == 7)
+                break;
+
+            /* Ignore multiple occurrences of ' '. Thanks jstancek! */
+            while ((c = fgetc(fpnu)) != EOF && c == ' ')
+                ;
+
             if (field == 6)
             {
                 if ((inode_pos = ftell(fpnu)) < 0)
                     goto cleanup;
             }
-            else if (field == 7)
-                break;
         }
 
         if (c != '\n' && field == 7)
         {
-            /* inode_pos is the white space right before the inode value */
             const long cur_pos = ftell(fpnu);
             if (cur_pos <= inode_pos)
                 goto cleanup;
 
-            const long inode_len = (cur_pos - inode_pos) - 1;
+            const long inode_len = (cur_pos - inode_pos);
 
             const char *path_iter = dev_log_path;
             while ((c = fgetc(fpnu)) != EOF && c != '\n' && c == *path_iter)
