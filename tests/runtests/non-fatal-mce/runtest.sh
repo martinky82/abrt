@@ -33,6 +33,10 @@ PACKAGE="abrt"
 MCE_REQUIRED_FILES="kernel uuid duphash dmesg not-reportable
 pkg_name pkg_arch pkg_epoch pkg_release pkg_version"
 
+MCE_LOG="/var/log/mcelog"
+MESSAGE_LOG="/var/log/messages"
+OOPS_NONFATAL="oops-non-fatal-mce.test"
+
 rlJournalStart
     rlPhaseStartSetup
         check_prior_crashes
@@ -63,7 +67,96 @@ rlJournalStart
         rlAssertGrep "$kernel_version" "$crash_PATH/pkg_version"
         rlAssertGrep "The kernel log indicates that hardware errors were detected." "$crash_PATH/backtrace"
 
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
+    rlPhaseEnd
+
+    rlPhaseStartTest "MCE JOURNAL - Get mcelog from journal"
+        prepare
+
+        if [ -f "$MCE_LOG" ]; then
+            rlFileBackup --namespace "mcelog" "$MCE_LOG"
+            rlRun "rm -f $MCE_LOG" 0 "Removing $MCE_LOG"
+        fi
+
+        if [ -f "$MESSAGE_LOG" ]; then
+            rlFileBackup --namespace "messages" "$MESSAGE_LOG"
+            rlRun "rm -f $MESSAGE_LOG" 0 "Removing $MESSAGE_LOG"
+        fi
+
+        # See ../../../doc/MCE_readme.txt
+        rlRun "mce-inject mce.cfg"
+
+        # Do not be scared by timeouts, kernel sometimes fails to detect MCE.
+        wait_for_hooks
+        get_crash_path
+
+        for f in $MCE_REQUIRED_FILES; do
+            rlAssertExists "$crash_PATH/$f"
+        done
+
+        rlAssertGrep "kernel" "$crash_PATH/pkg_name"
+        rlAssertGrep "$kernel_version" "$crash_PATH/pkg_version"
+        rlAssertGrep "The kernel log indicates that hardware errors were detected." "$crash_PATH/backtrace"
+        rlAssertGrep "The last 20 mcelog lines of system log are" "$crash_PATH/backtrace"
+        rlRun "cat $crash_PATH/backtrace"
+
+        remove_problem_directory
+
+        if [ -f "$MCE_LOG" ]; then
+            rlFileRestore --namespace "mcelog"
+        fi
+
+        if [ -f "$MESSAGE_LOG" ]; then
+            rlFileRestore --namespace "messages"
+        fi
+    rlPhaseEnd
+
+    rlPhaseStartTest "MCE JOURNAL - journal is empty"
+        prepare
+
+        if [ -f "$MCE_LOG" ]; then
+            rlFileBackup --namespace "mcelog" "$MCE_LOG"
+            rlRun "rm -f $MCE_LOG" 0 "Removing $MCE_LOG"
+        fi
+
+        if [ -f "$MESSAGE_LOG" ]; then
+            rlFileBackup --namespace "messages" "$MESSAGE_LOG"
+            rlRun "rm -f $MESSAGE_LOG" 0 "Removing $MESSAGE_LOG"
+        fi
+
+        # backup journal logs before we delete them
+        rlFileBackup --clean --namespace "journal" "/var/log/journal"
+        rlRun "journalctl --flush --rotate" 0 "Flushing and rotating journal files"
+        rlRun "journalctl --vacuum-size=1" 0 "Vacuuming archived journal files"
+        rlRun "EXAMPLES_PATH=\"../../examples\""
+        rlRun "abrt-dump-oops -xD $EXAMPLES_PATH/$OOPS_NONFATAL 2>&1" 0 "Dump MCE OOPS"
+
+        # Do not be scared by timeouts, kernel sometimes fails to detect MCE.
+        wait_for_hooks
+        get_crash_path
+
+        for f in $MCE_REQUIRED_FILES; do
+            rlAssertExists "$crash_PATH/$f"
+        done
+
+        rlAssertGrep "kernel" "$crash_PATH/pkg_name"
+        rlAssertGrep "$kernel_version" "$crash_PATH/pkg_version"
+        rlAssertGrep "The kernel log indicates that hardware errors were detected." "$crash_PATH/backtrace"
+        rlAssertGrep "However, neither /var/log/mcelog nor system log contain mcelog messages" "$crash_PATH/backtrace"
+        rlRun "cat $crash_PATH/backtrace"
+
+        remove_problem_directory
+
+        if [ -f "$MCE_LOG" ]; then
+            rlFileRestore --namespace "mcelog"
+        fi
+
+        if [ -f "$MESSAGE_LOG" ]; then
+            rlFileRestore --namespace "messages"
+        fi
+
+        # restore deleted journal logs
+        rlFileRestore --namespace "journal"
     rlPhaseEnd
 
     rlPhaseStartTest "rhbz1064458"
@@ -73,7 +166,13 @@ rlJournalStart
 
         prepare
 
-        rlRun "EXAMPLES_PATH=\"../../../examples\""
+        rlRun "EXAMPLES_PATH=\"../../examples\""
+
+        # prepare oops1.test from template
+        cat $EXAMPLES_PATH/oops1.test.template | \
+            sed "s/2.6.27.9-159.fc10.i686/<KERNEL_VERSION>/" | \
+            sed "s/:HOSTNAME:/$( hostname )/" > \
+            $EXAMPLES_PATH/oops1.test
 
         # Hopefully we don't remove running kernel's package
         rlRun "sed s/2.6.27.9-159.fc10.i686/$(uname -r)/ $EXAMPLES_PATH/oops1.test | abrt-dump-oops -xD 2>&1 | grep 'abrt-dump-oops: Found oopses: [1-9]'" 0 "Found OOPS"
@@ -84,7 +183,7 @@ rlJournalStart
         rlAssertNotExists "$crash_PATH/not-reportable"
         rlAssertNotGrep "The kernel log indicates that hardware errors were detected." "$crash_PATH/backtrace"
 
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
     rlPhaseEnd
 
     rlPhaseStartCleanup

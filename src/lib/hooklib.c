@@ -18,7 +18,7 @@
 #include <sys/statvfs.h>
 #include "internal_libabrt.h"
 
-int low_free_space(unsigned setting_MaxCrashReportsSize, const char *dump_location)
+int abrt_low_free_space(unsigned setting_MaxCrashReportsSize, const char *dump_location)
 {
     struct statvfs vfs;
     if (statvfs(dump_location, &vfs) != 0)
@@ -45,7 +45,7 @@ int low_free_space(unsigned setting_MaxCrashReportsSize, const char *dump_locati
  * Check total size of problem dirs, if it overflows,
  * delete oldest/biggest dirs.
  */
-void trim_problem_dirs(const char *dirname, double cap_size, const char *exclude_path)
+void abrt_trim_problem_dirs(const char *dirname, double cap_size, const char *exclude_path)
 {
     const char *excluded_basename = NULL;
     if (exclude_path)
@@ -67,20 +67,17 @@ void trim_problem_dirs(const char *dirname, double cap_size, const char *exclude
     while (--count >= 0)
     {
         /* We exclude our own dir from candidates for deletion (3rd param): */
-        char *worst_basename = NULL;
-        double cur_size = get_dirsize_find_largest_dir(dirname, &worst_basename, excluded_basename);
+        g_autofree char *worst_basename = NULL;
+        double cur_size = libreport_get_dirsize_find_largest_dir(dirname, &worst_basename, excluded_basename, NULL);
         if (cur_size <= cap_size || !worst_basename)
         {
             log_info("cur_size:%.0f cap_size:%.0f, no (more) trimming", cur_size, cap_size);
-            free(worst_basename);
             break;
         }
-        log("%s is %.0f bytes (more than %.0fMiB), deleting '%s'",
+        log_warning("%s is %.0f bytes (more than %.0fMiB), deleting '%s'",
                 dirname, cur_size, cap_size / (1024*1024), worst_basename);
-        char *d = concat_path_file(dirname, worst_basename);
-        free(worst_basename);
+        g_autofree char *d = g_build_filename(dirname ? dirname : "", worst_basename, NULL);
         delete_dump_dir(d);
-        free(d);
     }
 }
 
@@ -117,23 +114,23 @@ static char* exec_vp(char **args, int redirect_stderr, int exec_timeout_sec, int
     VERB1 flags &= ~EXECFLG_QUIET;
 
     int pipeout[2];
-    pid_t child = fork_execv_on_steroids(flags, args, pipeout, (char**)env_vec, /*dir:*/ NULL, /*uid(unused):*/ 0);
+    pid_t child = libreport_fork_execv_on_steroids(flags, args, pipeout, (char**)env_vec, /*dir:*/ NULL, /*uid(unused):*/ 0);
 
     /* We use this function to run gdb and unstrip. Bugs in gdb or corrupted
      * coredumps were observed to cause gdb to enter infinite loop.
      * Therefore we have a (largish) timeout, after which we kill the child.
      */
-    ndelay_on(pipeout[0]);
+    libreport_ndelay_on(pipeout[0]);
     int t = time(NULL); /* int is enough, no need to use time_t */
     int endtime = t + exec_timeout_sec;
-    struct strbuf *buf_out = strbuf_new();
+    GString *buf_out = g_string_new(NULL);
     while (1)
     {
         int timeout = endtime - t;
         if (timeout < 0)
         {
             kill(child, SIGKILL);
-            strbuf_append_strf(buf_out, "\n"
+            g_string_append_printf(buf_out, "\n"
                         "Timeout exceeded: %u seconds, killing %s.\n"
                         "Looks like gdb hung while generating backtrace.\n"
                         "This may be a bug in gdb. Consider submitting a bug report to gdb developers.\n"
@@ -159,7 +156,7 @@ static char* exec_vp(char **args, int redirect_stderr, int exec_timeout_sec, int
             break;
         }
         buff[r] = '\0';
-        strbuf_append_str(buf_out, buff);
+        g_string_append(buf_out, buff);
  next:
         t = time(NULL);
     }
@@ -167,38 +164,38 @@ static char* exec_vp(char **args, int redirect_stderr, int exec_timeout_sec, int
 
     /* Prevent having zombie child process, and maybe collect status
      * (note that status == NULL is ok too) */
-    safe_waitpid(child, status, 0);
+    libreport_safe_waitpid(child, status, 0);
 
-    return strbuf_free_nobuf(buf_out);
+    return g_string_free(buf_out, FALSE);
 }
 
-char *run_unstrip_n(const char *dump_dir_name, unsigned timeout_sec)
+char *abrt_run_unstrip_n(const char *dump_dir_name, unsigned timeout_sec)
 {
     int flags = EXECFLG_INPUT_NUL | EXECFLG_OUTPUT | EXECFLG_SETSID | EXECFLG_QUIET;
     VERB1 flags &= ~EXECFLG_QUIET;
     int pipeout[2];
     char* args[4];
     args[0] = (char*)"eu-unstrip";
-    args[1] = xasprintf("--core=%s/"FILENAME_COREDUMP, dump_dir_name);
+    args[1] = g_strdup_printf("--core=%s/"FILENAME_COREDUMP, dump_dir_name);
     args[2] = (char*)"-n";
     args[3] = NULL;
-    pid_t child = fork_execv_on_steroids(flags, args, pipeout, /*env_vec:*/ NULL, /*dir:*/ NULL, /*uid(unused):*/ 0);
+    pid_t child = libreport_fork_execv_on_steroids(flags, args, pipeout, /*env_vec:*/ NULL, /*dir:*/ NULL, /*uid(unused):*/ 0);
     free(args[1]);
 
     /* Bugs in unstrip or corrupted coredumps can cause it to enter infinite loop.
      * Therefore we have a (largish) timeout, after which we kill the child.
      */
-    ndelay_on(pipeout[0]);
+    libreport_ndelay_on(pipeout[0]);
     int t = time(NULL); /* int is enough, no need to use time_t */
     int endtime = t + timeout_sec;
-    struct strbuf *buf_out = strbuf_new();
+    GString *buf_out = g_string_new(NULL);
     while (1)
     {
         int timeout = endtime - t;
         if (timeout < 0)
         {
             kill(child, SIGKILL);
-            strbuf_free(buf_out);
+            g_string_free(buf_out, TRUE);
             buf_out = NULL;
             break;
         }
@@ -219,7 +216,7 @@ char *run_unstrip_n(const char *dump_dir_name, unsigned timeout_sec)
             break;
         }
         buff[r] = '\0';
-        strbuf_append_str(buf_out, buff);
+        g_string_append(buf_out, buff);
  next:
         t = time(NULL);
     }
@@ -227,48 +224,48 @@ char *run_unstrip_n(const char *dump_dir_name, unsigned timeout_sec)
 
     /* Prevent having zombie child process */
     int status;
-    safe_waitpid(child, &status, 0);
+    libreport_safe_waitpid(child, &status, 0);
 
     if (status != 0 || buf_out == NULL)
     {
         /* unstrip didnt exit with exit code 0, or we timed out */
-        strbuf_free(buf_out);
+        g_string_free(buf_out, TRUE);
         return NULL;
     }
 
-    return strbuf_free_nobuf(buf_out);
+    return g_string_free(buf_out, FALSE);
 }
 
-char *get_backtrace(const char *dump_dir_name, unsigned timeout_sec, const char *debuginfo_dirs)
+char *abrt_get_backtrace(struct dump_dir *dd, unsigned timeout_sec, const char *debuginfo_dirs)
 {
     INITIALIZE_LIBABRT();
 
-    struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
-    if (!dd)
-        return NULL;
-    char *executable = dd_load_text(dd, FILENAME_EXECUTABLE);
-    dd_close(dd);
+    char *executable = NULL;
+    if (dd_exist(dd, FILENAME_BINARY))
+        executable = g_build_filename(dd->dd_dirname ? dd->dd_dirname : "", FILENAME_BINARY, NULL);
+    else
+        executable = dd_load_text(dd, FILENAME_EXECUTABLE);
 
     /* Let user know what's going on */
-    log(_("Generating backtrace"));
+    log_warning(_("Generating backtrace"));
 
     unsigned i = 0;
     char *args[25];
-    args[i++] = (char*)"gdb";
+    args[i++] = (char*)GDB;
     args[i++] = (char*)"-batch";
-    struct strbuf *set_debug_file_directory = strbuf_new();
+    GString *set_debug_file_directory = g_string_new(NULL);
     unsigned auto_load_base_index = 0;
     if(debuginfo_dirs == NULL)
     {
         // set non-existent debug file directory to prevent resolving
         // function names - we need offsets for core backtrace.
-        strbuf_append_str(set_debug_file_directory, "set debug-file-directory /");
+        g_string_append(set_debug_file_directory, "set debug-file-directory /");
     }
     else
     {
-        strbuf_append_str(set_debug_file_directory, "set debug-file-directory /usr/lib/debug");
+        g_string_append(set_debug_file_directory, "set debug-file-directory /usr/lib/debug:/usr/lib");
 
-        struct strbuf *debug_directories = strbuf_new();
+        GString *debug_directories = g_string_new(NULL);
         const char *p = debuginfo_dirs;
         while (1)
         {
@@ -277,25 +274,28 @@ char *get_backtrace(const char *dump_dir_name, unsigned timeout_sec, const char 
             if (*p == '\0')
                 break;
             const char *colon_or_nul = strchrnul(p, ':');
-            strbuf_append_strf(debug_directories, "%s%.*s/usr/lib/debug", (debug_directories->len == 0 ? "" : ":"),
-                                                                          (int)(colon_or_nul - p), p);
+            g_string_append_printf(debug_directories,
+                               "%s%.*s/usr/lib/debug:%.*s/usr/lib",
+                               (debug_directories->len == 0 ? "" : ":"),
+                               (int)(colon_or_nul - p), p,
+                               (int)(colon_or_nul - p), p);
             p = colon_or_nul;
         }
 
-        strbuf_append_strf(set_debug_file_directory, ":%s", debug_directories->buf);
+        g_string_append_printf(set_debug_file_directory, ":%s", debug_directories->str);
 
         args[i++] = (char*)"-iex";
         auto_load_base_index = i;
-        args[i++] = xasprintf("add-auto-load-safe-path %s", debug_directories->buf);
+        args[i++] = g_strdup_printf("add-auto-load-safe-path %s", debug_directories->str);
         args[i++] = (char*)"-iex";
-        args[i++] = xasprintf("add-auto-load-scripts-directory %s", debug_directories->buf);
+        args[i++] = g_strdup_printf("add-auto-load-scripts-directory %s", debug_directories->str);
 
-        strbuf_free(debug_directories);
+        g_string_free(debug_directories, TRUE);
     }
 
     args[i++] = (char*)"-ex";
     const unsigned debug_dir_cmd_index = i++;
-    args[debug_dir_cmd_index] = strbuf_free_nobuf(set_debug_file_directory);
+    args[debug_dir_cmd_index] = g_string_free(set_debug_file_directory, FALSE);
 
     /* "file BINARY_FILE" is needed, without it gdb cannot properly
      * unwind the stack. Currently the unwind information is located
@@ -319,12 +319,12 @@ char *get_backtrace(const char *dump_dir_name, unsigned timeout_sec, const char 
      */
     args[i++] = (char*)"-ex";
     const unsigned file_cmd_index = i++;
-    args[file_cmd_index] = xasprintf("file %s", executable);
+    args[file_cmd_index] = g_strdup_printf("file %s", executable);
     free(executable);
 
     args[i++] = (char*)"-ex";
     const unsigned core_cmd_index = i++;
-    args[core_cmd_index] = xasprintf("core-file %s/"FILENAME_COREDUMP, dump_dir_name);
+    args[core_cmd_index] = g_strdup_printf("core-file %s/"FILENAME_COREDUMP, dd->dd_dirname);
 
     args[i++] = (char*)"-ex";
     const unsigned bt_cmd_index = i++;
@@ -347,11 +347,11 @@ char *get_backtrace(const char *dump_dir_name, unsigned timeout_sec, const char 
     /* Limit bt depth. With no limit, gdb sometimes OOMs the machine */
     unsigned bt_depth = 1024;
     const char *thread_apply_all = "thread apply all -ascending";
-    const char *full = " full";
+    const char *full = "full ";
     char *bt = NULL;
     while (1)
     {
-        args[bt_cmd_index] = xasprintf("%s backtrace %u%s", thread_apply_all, bt_depth, full);
+        args[bt_cmd_index] = g_strdup_printf("%s backtrace %s%u", thread_apply_all, full, bt_depth);
         bt = exec_vp(args, /*redirect_stderr:*/ 1, timeout_sec, NULL);
         free(args[bt_cmd_index]);
         if ((bt && strnlen(bt, 256*1024) < 256*1024) || bt_depth <= 32)
@@ -361,13 +361,17 @@ char *get_backtrace(const char *dump_dir_name, unsigned timeout_sec, const char 
 
         bt_depth /= 2;
         if (bt)
-            log("Backtrace is too big (%u bytes), reducing depth to %u",
+        {
+            log_warning("Backtrace is too big (%u bytes), reducing depth to %u",
                         (unsigned)strlen(bt), bt_depth);
+        }
         else
+        {
             /* (NB: in fact, current impl. of exec_vp() never returns NULL) */
-            log("Failed to generate backtrace, reducing depth to %u",
+            log_warning("Failed to generate backtrace, reducing depth to %u",
                         bt_depth);
-        free(bt);
+            g_clear_pointer(&bt, free);
+        }
 
         /* Replace -ex disassemble (which disasms entire function $pc points to)
          * to a version which analyzes limited, small patch of code around $pc.
@@ -408,14 +412,14 @@ char *get_backtrace(const char *dump_dir_name, unsigned timeout_sec, const char 
 
 char* problem_data_save(problem_data_t *pd)
 {
-    load_abrt_conf();
+    abrt_load_abrt_conf();
 
-    struct dump_dir *dd = create_dump_dir_from_problem_data_ext(pd, g_settings_dump_location, /*fs owner*/0);
+    struct dump_dir *dd = create_dump_dir_from_problem_data_ext(pd, abrt_g_settings_dump_location, /*fs owner*/0);
 
     char *problem_id = NULL;
     if (dd)
     {
-        problem_id = xstrdup(dd->dd_dirname);
+        problem_id = g_strdup(dd->dd_dirname);
         dd_close(dd);
     }
 
@@ -437,7 +441,7 @@ int dump_suid_policy()
     FILE *f  = fopen(filename, "r");
     if (!f)
     {
-        log("Can't open %s", filename);
+        log_warning("Can't open %s", filename);
         return suid_dump_policy;
     }
 
@@ -446,7 +450,7 @@ int dump_suid_policy()
     if (c != EOF)
         suid_dump_policy = c - '0';
 
-    //log("suid dump policy is: %i", suid_dump_policy);
+    //log_warning("suid dump policy is: %i", suid_dump_policy);
     return suid_dump_policy;
 }
 
@@ -463,9 +467,11 @@ int signal_is_fatal(int signal_no, const char **name)
     // We have real-world reports from users who see buggy programs
     // dying with SIGTRAP, uncommented it too:
         case SIGTRAP: signame = "TRAP"; break; //Trace/breakpoint trap
+    // SIGSYS is sent when a process uses a forbidden syscall, which is
+    // definitely a program bug
+        case SIGSYS : signame = "SYS" ; break; //Bad argument to routine (SVr4)
     // These usually aren't caused by bugs:
       //case SIGQUIT: signame = "QUIT"; break; //Quit from keyboard
-      //case SIGSYS : signame = "SYS" ; break; //Bad argument to routine (SVr4)
       //case SIGXCPU: signame = "XCPU"; break; //CPU time limit exceeded (4.2BSD)
       //case SIGXFSZ: signame = "XFSZ"; break; //File size limit exceeded (4.2BSD)
     }
@@ -476,7 +482,7 @@ int signal_is_fatal(int signal_no, const char **name)
     return signame != NULL;
 }
 
-void ensure_writable_dir_uid_gid(const char *dir, mode_t mode, uid_t uid, gid_t gid)
+void abrt_ensure_writable_dir_uid_gid(const char *dir, mode_t mode, uid_t uid, gid_t gid)
 {
     struct stat sb;
     int dir_fd;
@@ -500,16 +506,16 @@ void ensure_writable_dir_uid_gid(const char *dir, mode_t mode, uid_t uid, gid_t 
     close(dir_fd);
 }
 
-void ensure_writable_dir(const char *dir, mode_t mode, const char *user)
+void abrt_ensure_writable_dir(const char *dir, mode_t mode, const char *user)
 {
     struct passwd *pw = getpwnam(user);
     if (!pw)
         perror_msg_and_die("Can't find user '%s'", user);
 
-    ensure_writable_dir_uid_gid(dir, mode, pw->pw_uid, pw->pw_gid);
+    abrt_ensure_writable_dir_uid_gid(dir, mode, pw->pw_uid, pw->pw_gid);
 }
 
-void ensure_writable_dir_group(const char *dir, mode_t mode, const char *user, const char *group)
+void abrt_ensure_writable_dir_group(const char *dir, mode_t mode, const char *user, const char *group)
 {
     struct passwd *pw = getpwnam(user);
     if (!pw)
@@ -519,26 +525,26 @@ void ensure_writable_dir_group(const char *dir, mode_t mode, const char *user, c
     if (!gr)
         perror_msg_and_die("Can't find group '%s'", group);
 
-    ensure_writable_dir_uid_gid(dir, mode, pw->pw_uid, gr->gr_gid);
+    abrt_ensure_writable_dir_uid_gid(dir, mode, pw->pw_uid, gr->gr_gid);
 }
 
-bool dir_is_in_dump_location(const char *dir_name)
+bool abrt_dir_is_in_dump_location(const char *dir_name)
 {
-    unsigned len = strlen(g_settings_dump_location);
+    unsigned len = strlen(abrt_g_settings_dump_location);
 
-    /* The path must start with "g_settings_dump_location" */
-    if (strncmp(dir_name, g_settings_dump_location, len) != 0)
+    /* The path must start with "abrt_g_settings_dump_location" */
+    if (strncmp(dir_name, abrt_g_settings_dump_location, len) != 0)
     {
-        log_debug("Bad parent directory: '%s' not in '%s'", g_settings_dump_location, dir_name);
+        log_debug("Bad parent directory: '%s' not in '%s'", abrt_g_settings_dump_location, dir_name);
         return false;
     }
 
-    /* and must be a sub-directory of the g_settings_dump_location dir */
+    /* and must be a sub-directory of the abrt_g_settings_dump_location dir */
     const char *base_name = dir_name + len;
     while (*base_name && *base_name == '/')
         ++base_name;
 
-    if (*(base_name - 1) != '/' || !str_is_correct_filename(base_name))
+    if (*(base_name - 1) != '/' || !libreport_str_is_correct_filename(base_name))
     {
         log_debug("Invalid dump directory name: '%s'", base_name);
         return false;
@@ -555,7 +561,7 @@ bool dir_is_in_dump_location(const char *dir_name)
     return S_ISDIR(sb.st_mode);
 }
 
-bool dir_has_correct_permissions(const char *dir_name, int flags)
+bool abrt_dir_has_correct_permissions(const char *dir_name, int flags)
 {
     struct stat statbuf;
     if (lstat(dir_name, &statbuf) != 0 || !S_ISDIR(statbuf.st_mode))
@@ -594,22 +600,33 @@ bool dir_has_correct_permissions(const char *dir_name, int flags)
      * 1. Chowning of dump directories switches the ownership to 'user':'abrt'
      * 2. We want to allow users to delete their problems
      * 3. We want to allow users to modify their data
-     * 4. The daemons are hardened agains hard link and symbolic link issues.
+     * 4. The daemons are hardened against hard link and symbolic link issues.
      */
     return correct_group;
 }
 
-bool allowed_new_user_problem_entry(uid_t uid, const char *name, const char *value)
+bool problem_entry_is_post_create_condition(const char *name)
+{
+    return    strcmp(name, FILENAME_TYPE) == 0
+           /* Replaced with FILENAME_TYPE on '2015-01-15'
+            * commit a6efe199922165725b200298d5b276b52912f3dd
+            * Users scripts might not be adapted to it yet.
+            */
+           || strcmp(name, FILENAME_ANALYZER) == 0
+           /* Compatibility value used in abrt-server.
+            * There still might some scripts using it.
+            */
+           || strcmp(name, "basename") == 0;
+}
+
+bool abrt_new_user_problem_entry_allowed(uid_t uid, const char *name, const char *value)
 {
     /* Allow root to create everything */
     if (uid == 0)
         return true;
 
-    /* Permit non-root users to create everything except: analyzer and type */
-    if (strcmp(name, FILENAME_ANALYZER) != 0
-     && strcmp(name, FILENAME_TYPE) != 0
-     /* compatibility value used in abrt-server */
-     && strcmp(name, "basename") != 0)
+    /* Permit non-root users to create everything except post-create condition elements */
+    if (!problem_entry_is_post_create_condition(name))
         return true;
 
     /* Permit non-root users to create all types except: C/C++, Koops, vmcore and xorg */

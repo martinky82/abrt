@@ -16,7 +16,6 @@
   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
 */
 
-#include <polkit/polkit.h>
 #include <glib-object.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -24,17 +23,23 @@
 #include "libabrt.h"
 #include "abrt-polkit.h"
 
+#ifdef HAVE_POLKIT
+#include <polkit/polkit.h>
+#endif
+
 /*number of seconds: timeout for the authorization*/
 #define POLKIT_TIMEOUT 20
 
+#ifdef HAVE_POLKIT
 static gboolean do_cancel(GCancellable* cancellable)
 {
-    log("Timer has expired; cancelling authorization check\n");
+    log_warning("Timer has expired; cancelling authorization check\n");
     g_cancellable_cancel(cancellable);
     return FALSE;
 }
+#endif
 
-
+#ifdef HAVE_POLKIT
 static PolkitResult do_check(PolkitSubject *subject, const char *action_id)
 {
     PolkitAuthority *authority;
@@ -59,8 +64,10 @@ static PolkitResult do_check(PolkitSubject *subject, const char *action_id)
                 POLKIT_CHECK_AUTHORIZATION_FLAGS_ALLOW_USER_INTERACTION,
                 cancellable,
                 &error);
+    g_object_unref(cancellable);
     g_object_unref(authority);
     g_source_remove(cancel_timeout);
+    g_object_unref(subject);
     if (error)
     {
         g_error_free(error);
@@ -72,8 +79,11 @@ static PolkitResult do_check(PolkitSubject *subject, const char *action_id)
 
     if (polkit_authorization_result_get_is_challenge(auth_result))
     {
-        /* Can't happen (happens only with
-         * POLKIT_CHECK_AUTHORIZATION_FLAGS_NONE flag) */
+        /* This will normally not happen, but, if it does, check if you registered
+         * an authentication agent with Polkit, because otherwise things will
+         * break in text consoles.
+         */
+        g_warn_if_reached();
         result = PolkitChallenge;
         goto out;
     }
@@ -88,22 +98,33 @@ out:
     g_object_unref(auth_result);
     return result;
 }
+#endif
 
 PolkitResult polkit_check_authorization_dname(const char *dbus_name, const char *action_id)
 {
-    glib_init();
+#ifdef HAVE_POLKIT
+    libreport_glib_init();
 
     PolkitSubject *subject = polkit_system_bus_name_new(dbus_name);
     return do_check(subject, action_id);
+#else
+    log_warning("Polkit disabled. Everyone has access to private data");
+    return PolkitYes;
+#endif
 }
 
 PolkitResult polkit_check_authorization_pid(pid_t pid, const char *action_id)
 {
-    glib_init();
+#ifdef HAVE_POLKIT
+    libreport_glib_init();
 
     PolkitSubject *subject = polkit_unix_process_new_for_owner(pid,
             /*use start_time from /proc*/0,
             /*use uid from /proc*/ -1);
 
     return do_check(subject, action_id);
+#else
+    log_warning("Polkit disabled. Everyone has access to private data");
+    return PolkitYes;
+#endif
 }

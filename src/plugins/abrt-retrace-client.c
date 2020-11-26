@@ -16,11 +16,16 @@
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 #include "https-utils.h"
+#include <spawn.h>
+#include <glib-unix.h>
+#include <glib/gstdio.h>
 
 #define MAX_FORMATS 16
 #define MAX_RELEASES 32
 #define MAX_DOTS_PER_LINE 80
 #define MIN_EXPLOITABLE_RATING 4
+
+extern char **environ;
 
 enum
 {
@@ -60,14 +65,20 @@ static bool no_pkgcheck;
 
 static struct https_cfg cfg =
 {
-    .url = "retrace.fedoraproject.org",
-    .port = 443,
+    .uri = "https://retrace.fedoraproject.org",
     .ssl_allow_insecure = false,
 };
 
+static void print_header(const char *name,
+                         const char *value,
+                         gpointer    user_data)
+{
+    fprintf(user_data, "%s: %s\n", name, value);
+}
+
 static void alert_crash_too_large()
 {
-    alert(_("Retrace server can not be used, because the crash "
+    libreport_alert(_("Retrace server can not be used, because the crash "
             "is too large. Try local retracing."));
 }
 
@@ -92,18 +103,24 @@ static void args_add_if_exists(const char *args[],
  */
 static int create_archive(bool unlink_temp)
 {
+    pid_t xz_child, tar_child;
+    int err;
+    int xz_attr_set = 0, tar_attr_set = 0;
+    int xz_actions_set = 0, tar_actions_set = 0;
+    posix_spawnattr_t xz_attr, tar_attr;
+    posix_spawn_file_actions_t xz_actions, tar_actions;
+
     struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
     if (!dd)
         return -1;
 
     /* Open a temporary file. */
-    char *filename = xstrdup(LARGE_DATA_TMP_DIR"/abrt-retrace-client-archive-XXXXXX.tar.xz");
+    g_autofree char *filename = g_strdup(LARGE_DATA_TMP_DIR"/abrt-retrace-client-archive-XXXXXX.tar.xz");
     int tempfd = mkstemps(filename, /*suffixlen:*/7);
     if (tempfd == -1)
         perror_msg_and_die(_("Can't create temporary file in "LARGE_DATA_TMP_DIR));
     if (unlink_temp)
-        xunlink(filename);
-    free(filename);
+        g_unlink(filename);
 
     /* Run xz:
      * - xz reads input from a pipe
@@ -116,20 +133,35 @@ static int create_archive(bool unlink_temp)
     xz_args[3] = NULL;
 
     int tar_xz_pipe[2];
-    xpipe(tar_xz_pipe);
+    g_unix_open_pipe(tar_xz_pipe, 0, NULL);
 
     fflush(NULL); /* paranoia */
-    pid_t xz_child = vfork();
-    if (xz_child == -1)
-        perror_msg_and_die("vfork");
-    if (xz_child == 0)
+
+    if ((err = posix_spawn_file_actions_init(&xz_actions)) != 0
+#ifdef POSIX_SPAWN_USEVFORK
+         || (err = posix_spawnattr_init(&xz_attr)) != 0
+         || (xz_attr_set = 1,
+             err = posix_spawnattr_setflags(&xz_attr, POSIX_SPAWN_USEVFORK)) != 0
+#endif
+         || (xz_actions_set = 1,
+             err = posix_spawn_file_actions_addclose(&xz_actions, tar_xz_pipe[1])) != 0
+         || (err = posix_spawn_file_actions_adddup2(&xz_actions, tar_xz_pipe[0], STDIN_FILENO)) != 0
+         || (err = posix_spawn_file_actions_adddup2(&xz_actions, tempfd, STDOUT_FILENO)) != 0)
     {
-        close(tar_xz_pipe[1]);
-        xmove_fd(tar_xz_pipe[0], STDIN_FILENO);
-        xmove_fd(tempfd, STDOUT_FILENO);
-        execvp(xz_args[0], (char * const*)xz_args);
-        perror_msg_and_die(_("Can't execute '%s'"), xz_args[0]);
+        if (xz_actions_set == 1)
+            posix_spawn_file_actions_destroy(&xz_actions);
+
+        if (xz_attr_set == 1)
+            posix_spawnattr_destroy(&xz_attr);
+
+        perror_msg_and_die("posix_spawn init");
     }
+    if ((err = posix_spawnp(&xz_child, xz_args[0], &xz_actions, &xz_attr, (char * const*)xz_args, environ)) != 0)
+        perror_msg_and_die(_("Can't execute '%s'"), xz_args[0]);
+
+    if ((err = posix_spawn_file_actions_destroy(&xz_actions)) != 0
+         || ((xz_attr_set == 1) && ((err = posix_spawnattr_destroy(&xz_attr)) != 0)))
+         perror_msg_and_die("posix_spawn destroy");
 
     close(tar_xz_pipe[0]);
 
@@ -139,7 +171,7 @@ static int create_archive(bool unlink_temp)
     const char *tar_args[10];
     tar_args[0] = "tar";
     tar_args[1] = "cO";
-    tar_args[2] = xasprintf("--directory=%s", dump_dir_name);
+    tar_args[2] = g_strdup_printf("--directory=%s", dump_dir_name);
 
     const char **required_files = task_type == TASK_VMCORE ? required_vmcore : required_retrace;
     int index = 3;
@@ -157,16 +189,33 @@ static int create_archive(bool unlink_temp)
     dd_close(dd);
 
     fflush(NULL); /* paranoia */
-    pid_t tar_child = vfork();
-    if (tar_child == -1)
-        perror_msg_and_die("vfork");
-    if (tar_child == 0)
+
+    const char *dev_null_path = "/dev/null";
+
+    if ((err = posix_spawn_file_actions_init(&tar_actions)) != 0
+#ifdef POSIX_SPAWN_USEVFORK
+         || (err = posix_spawnattr_init(&tar_attr)) != 0
+         || (tar_attr_set = 1,
+             err = posix_spawnattr_setflags(&tar_attr, POSIX_SPAWN_USEVFORK)) != 0
+#endif
+         || (tar_actions_set = 1,
+             err = posix_spawn_file_actions_addopen(&tar_actions, STDIN_FILENO, dev_null_path, O_RDWR, 0)) != 0
+         || (err = posix_spawn_file_actions_adddup2(&tar_actions, tar_xz_pipe[1], STDOUT_FILENO)) != 0)
     {
-        xmove_fd(xopen("/dev/null", O_RDWR), STDIN_FILENO);
-        xmove_fd(tar_xz_pipe[1], STDOUT_FILENO);
-        execvp(tar_args[0], (char * const*)tar_args);
-        perror_msg_and_die(_("Can't execute '%s'"), tar_args[0]);
+         if (tar_actions_set == 1)
+             posix_spawn_file_actions_destroy(&tar_actions);
+
+         if (tar_attr_set == 1)
+             posix_spawnattr_destroy(&tar_attr);
+
+         perror_msg_and_die("posix_spawn init");
     }
+    if ((err = posix_spawnp(&tar_child, tar_args[0], &tar_actions, &tar_attr, (char * const*)tar_args, environ)) != 0)
+        perror_msg_and_die(_("Can't execute '%s'"), tar_args[0]);
+
+    if ((err = posix_spawn_file_actions_destroy(&tar_actions)) != 0
+         || ((tar_attr_set == 1) && ((err = posix_spawnattr_destroy(&tar_attr)) != 0)))
+         perror_msg_and_die("posix_spawn destroy");
 
     free((void*)tar_args[2]);
     close(tar_xz_pipe[1]);
@@ -174,64 +223,107 @@ static int create_archive(bool unlink_temp)
     /* Wait for tar and xz to finish successfully */
     int status;
     log_notice("Waiting for tar...");
-    safe_waitpid(tar_child, &status, 0);
+    libreport_safe_waitpid(tar_child, &status, 0);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
         /* Hopefully, by this time child emitted more meaningful
          * error message. But just in case it didn't:
          */
         error_msg_and_die(_("Can't create temporary file in "LARGE_DATA_TMP_DIR));
     log_notice("Waiting for xz...");
-    safe_waitpid(xz_child, &status, 0);
+    libreport_safe_waitpid(xz_child, &status, 0);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
         error_msg_and_die(_("Can't create temporary file in "LARGE_DATA_TMP_DIR));
     log_notice("Done...");
 
-    xlseek(tempfd, 0, SEEK_SET);
+    libreport_xlseek(tempfd, 0, SEEK_SET);
     return tempfd;
 }
 
-struct retrace_settings *get_settings()
+G_GNUC_NULL_TERMINATED
+static SoupURI *build_uri_from_config(struct https_cfg *config,
+                                      const char       *segment,
+                                      ...)
 {
-    struct retrace_settings *settings = xzalloc(sizeof(struct retrace_settings));
+    SoupURI *uri;
+    va_list args;
+    g_autofree const char *path = NULL;
 
-    PRFileDesc *tcp_sock, *ssl_sock;
-    ssl_connect(&cfg, &tcp_sock, &ssl_sock);
-    struct strbuf *http_request = strbuf_new();
-    strbuf_append_strf(http_request,
-                       "GET /settings HTTP/1.1\r\n"
-                       "Host: %s\r\n"
-                       "Content-Length: 0\r\n"
-                       "Connection: close\r\n"
-                       "\r\n", cfg.url);
-    PRInt32 written = PR_Send(tcp_sock, http_request->buf, http_request->len,
-                              /*flags:*/0, PR_INTERVAL_NO_TIMEOUT);
-    if (written == -1)
+    g_return_val_if_fail(NULL != config, NULL);
+
+    uri = soup_uri_new_with_base(NULL, config->uri);
+    /* Really only for compatibility. */
+    if (NULL == soup_uri_get_scheme(uri))
     {
-        alert_connection_error(cfg.url);
-        error_msg_and_die(_("Failed to send HTTP header of length %d: NSS error %d"),
-                          http_request->len, PR_GetError());
-    }
-    strbuf_free(http_request);
+        g_autofree char *uri_string = NULL;
 
-    char *http_response = tcp_read_response(tcp_sock);
+        uri_string = g_strdup_printf("https://%s", config->uri);
+        uri = soup_uri_new(uri_string);
+    }
+
+    if (NULL == segment)
+    {
+        return uri;
+    }
+
+    path = soup_uri_get_path(uri);
+    path = g_build_path("/", path, segment, NULL);
+
+    va_start(args, segment);
+
+    for (segment = va_arg(args, const char *); NULL != segment; segment = va_arg(args, const char *))
+    {
+        g_autofree const char *tmp = NULL;
+
+        tmp = path;
+        path = g_build_path("/", path, segment, NULL);
+    }
+
+    va_end(args);
+
+    soup_uri_set_path(uri, path);
+
+    return uri;
+}
+
+struct retrace_settings *get_settings(SoupSession *session)
+{
+    g_autoptr(SoupURI) uri = NULL;
+    g_autoptr(SoupMessage) message = NULL;
+    guint response_code;
+    g_autoptr(SoupBuffer) response = NULL;
+    char *c;
+    char *value;
+    const char *row;
+
+    struct retrace_settings *settings = g_new0(struct retrace_settings, 1);
+    uri = build_uri_from_config(&cfg, "settings", NULL);
+    message = soup_message_new_from_uri("GET", uri);
+
+    soup_message_headers_append(message->request_headers, "Accept-Charset", lang.charset);
+
+    response_code = soup_session_send_message(session, message);
+
+    if (SOUP_STATUS_IS_TRANSPORT_ERROR(response_code))
+    {
+        alert_connection_error(cfg.uri);
+        error_msg_and_die("%s", message->reason_phrase);
+    }
+
+    response = soup_message_body_flatten(message->response_body);
+
     if (http_show_headers)
-        http_print_headers(stderr, http_response);
-    int response_code = http_get_response_code(http_response);
+    {
+        soup_message_headers_foreach(message->response_headers, print_header, stderr);
+    }
+
     if (response_code != 200)
     {
-        alert_server_error(cfg.url);
+        alert_server_error(cfg.uri);
         error_msg_and_die(_("Unexpected HTTP response from server: %d\n%s"),
-                          response_code, http_response);
+                          response_code, response->data);
     }
 
-    char *headers_end = strstr(http_response, "\r\n\r\n");
-    char *c, *row, *value;
-    if (!headers_end)
-    {
-        alert_server_error(cfg.url);
-        error_msg_and_die(_("Invalid response from server: missing HTTP message body."));
-    }
-    row = headers_end + strlen("\r\n\r\n");
+    row = response->data;
 
     do
     {
@@ -261,39 +353,36 @@ struct retrace_settings *get_settings()
             settings->max_unpacked_size = atoll(value) * 1024 * 1024;
         else if (0 == strcasecmp("supported_formats", row))
         {
-            char *space;
-            int i;
-            for (i = 0; i < MAX_FORMATS - 1 && (space = strchr(value, ' ')); ++i)
+            int i = 0;
+            char *space = NULL;
+            for (; i < MAX_FORMATS - 1 && (space = strchr(value, ' ')); ++i)
             {
                 *space = '\0';
-                settings->supported_formats[i] = xstrdup(value);
+                settings->supported_formats[i] = g_strdup(value);
                 value = space + 1;
             }
 
             /* last element */
-            settings->supported_formats[i] = xstrdup(value);
+            settings->supported_formats[i] = g_strdup(value);
         }
         else if (0 == strcasecmp("supported_releases", row))
         {
-            char *space;
-            int i;
-            for (i = 0; i < MAX_RELEASES - 1 && (space = strchr(value, ' ')); ++i)
+            int i = 0;
+            char *space = NULL;
+            for (; i < MAX_RELEASES - 1 && (space = strchr(value, ' ')); ++i)
             {
                 *space = '\0';
-                settings->supported_releases[i] = xstrdup(value);
+                settings->supported_releases[i] = g_strdup(value);
                 value = space + 1;
             }
 
             /* last element */
-            settings->supported_releases[i] = xstrdup(value);
+            settings->supported_releases[i] = g_strdup(value);
         }
 
         /* the beginning of the next row */
         row = c + 1;
     } while (c);
-
-    free(http_response);
-    ssl_disconnect(ssl_sock);
 
     return settings;
 }
@@ -315,20 +404,20 @@ static void free_settings(struct retrace_settings *settings)
 
 /* returns release identifier as dist-ver-arch */
 /* or NULL if unknown */
-static char *get_release_id(map_string_t *osinfo, const char *architecture)
+static char *get_release_id(GHashTable *osinfo, const char *architecture)
 {
-    char *arch = xstrdup(architecture);
+    g_autofree char *arch = g_strdup(architecture);
 
     if (strcmp("i686", arch) == 0 || strcmp("i586", arch) == 0)
     {
         free(arch);
-        arch = xstrdup("i386");
+        arch = g_strdup("i386");
     }
 
     char *result = NULL;
-    char *release = NULL;
-    char *version = NULL;
-    parse_osinfo_for_rhts(osinfo, (char **)&release, (char **)&version);
+    g_autofree char *release = NULL;
+    g_autofree char *version = NULL;
+    libreport_parse_osinfo_for_bz(osinfo, (char **)&release, (char **)&version);
 
     if (release == NULL || version == NULL)
         error_msg_and_die("Can't parse OS release name or version");
@@ -359,85 +448,108 @@ static char *get_release_id(map_string_t *osinfo, const char *architecture)
     else if (strcmp("Red Hat Enterprise Linux", release) == 0)
         strcpy(release, "rhel");
 
-    result = xasprintf("%s-%s-%s", release, version, arch);
+    result = g_strdup_printf("%s-%s-%s", release, version, arch);
 
-    free(release);
-    free(version);
-    free(arch);
     return result;
 }
 
-static int check_package(const char *nvr, const char *arch, map_string_t *osinfo, char **msg)
+static int check_package(SoupSession   *session,
+                         const char    *nvr,
+                         const char    *arch,
+                         GHashTable  *osinfo,
+                         char         **msg)
 {
-    char *releaseid = get_release_id(osinfo, arch);
+    g_autofree char *release_id = NULL;
+    g_autoptr(SoupURI) uri = NULL;
+    g_autoptr(SoupMessage) message = NULL;
+    guint response_code;
+    g_autoptr(SoupBuffer) response = NULL;
 
-    PRFileDesc *tcp_sock, *ssl_sock;
-    ssl_connect(&cfg, &tcp_sock, &ssl_sock);
-    struct strbuf *http_request = strbuf_new();
-    strbuf_append_strf(http_request,
-                       "GET /checkpackage HTTP/1.1\r\n"
-                       "Host: %s\r\n"
-                       "Content-Length: 0\r\n"
-                       "Connection: close\r\n"
-                       "X-Package-NVR: %s\r\n"
-                       "X-Package-Arch: %s\r\n"
-                       "X-OS-Release: %s\r\n"
-                       "%s"
-                       "%s"
-                       "\r\n",
-                       cfg.url, nvr, arch, releaseid,
-                       lang.accept_charset,
-                       lang.accept_language
-    );
+    release_id = get_release_id(osinfo, arch);
+    uri = build_uri_from_config(&cfg, "checkpackage", NULL);
+    message = soup_message_new_from_uri("GET", uri);
 
-    PRInt32 written = PR_Send(tcp_sock, http_request->buf, http_request->len,
-                              /*flags:*/0, PR_INTERVAL_NO_TIMEOUT);
-    if (written == -1)
+    soup_message_headers_append(message->request_headers, "X-Package-NVR", nvr);
+    soup_message_headers_append(message->request_headers, "X-Package-Arch", arch);
+    soup_message_headers_append(message->request_headers, "X-OS-Release", release_id);
+    soup_message_headers_append(message->request_headers, "Accept-Charset", lang.charset);
+
+    response_code = soup_session_send_message(session, message);
+
+    if (SOUP_STATUS_IS_TRANSPORT_ERROR(response_code))
     {
-        alert_connection_error(cfg.url);
-        error_msg_and_die(_("Failed to send HTTP header of length %d: NSS error %d"),
-                          http_request->len, PR_GetError());
+        alert_connection_error(cfg.uri);
+        error_msg_and_die("%s", message->reason_phrase);
     }
-    strbuf_free(http_request);
-    char *http_response = tcp_read_response(tcp_sock);
-    ssl_disconnect(ssl_sock);
+
+    response = soup_message_body_flatten(message->response_body);
+
     if (http_show_headers)
-        http_print_headers(stderr, http_response);
-    int response_code = http_get_response_code(http_response);
-    /* we are expecting either 302 or 404 */
+    {
+        soup_message_headers_foreach(message->response_headers, print_header, stderr);
+    }
+
     if (response_code != 302 && response_code != 404)
     {
-        char *http_body = http_get_body(http_response);
-        alert_server_error(cfg.url);
+        alert_server_error(cfg.uri);
         error_msg_and_die(_("Unexpected HTTP response from server: %d\n%s"),
-                            response_code, http_body);
+                            response_code, response->data);
     }
 
     if (msg)
     {
         if (response_code == 404)
         {
-            const char *os = get_map_string_item_or_empty(osinfo, OSINFO_PRETTY_NAME);
+            const char *os = (const char*)g_hash_table_lookup(osinfo, OSINFO_PRETTY_NAME);
             if (!os)
-                os = get_map_string_item_or_empty(osinfo, OSINFO_NAME);
+                os = (const char*)g_hash_table_lookup(osinfo, OSINFO_NAME);
 
-            *msg = xasprintf(_("Retrace server is unable to process package "
-                               "'%s.%s'.\nIs it a part of official '%s' repositories?"),
-                               nvr, arch, os);
+            if (os)
+                *msg = g_strdup_printf(_("Retrace server is unable to process package "
+                                         "'%s.%s'.\nIs it a part of official '%s' repositories?"),
+                                       nvr, arch, os);
+            else
+                *msg = g_strdup_printf(_("Retrace server is unable to process package "
+                                         "'%s.%s'.\nIs it a part of official repositories?"),
+                                       nvr, arch);
         }
         else
             *msg = NULL;
     }
 
-    free(http_response);
-    free(releaseid);
-
     return response_code == 302;
 }
 
-static int create(bool delete_temp_archive,
-                  char **task_id,
-                  char **task_password)
+typedef struct
+{
+    time_t start;
+    size_t bytes_written;
+} CreateProgressCallbackData;
+
+static void on_wrote_body_data(SoupMessage *msg,
+                               SoupBuffer  *chunk,
+                               gpointer     user_data)
+{
+    CreateProgressCallbackData *callback_data;
+    time_t now;
+
+    callback_data = user_data;
+    time(&now);
+
+    callback_data->bytes_written += chunk->length;
+
+    if (now - callback_data->start >= delay)
+    {
+        printf(_("Uploading %d%%\n"),
+               (int)(100 * callback_data->bytes_written / msg->request_body->length));
+        fflush(stdout);
+    }
+}
+
+static int create(SoupSession  *session,
+                  bool          delete_temp_archive,
+                  char        **task_id,
+                  char        **task_password)
 {
     if (delay)
     {
@@ -445,11 +557,13 @@ static int create(bool delete_temp_archive,
         fflush(stdout);
     }
 
-    struct retrace_settings *settings = get_settings();
+    struct retrace_settings *settings = get_settings(session);
+
+    g_return_val_if_fail(NULL != settings, EXIT_FAILURE);
 
     if (settings->running_tasks >= settings->max_running_tasks)
     {
-        alert(_("The server is fully occupied. Try again later."));
+        libreport_alert(_("The server is fully occupied. Try again later."));
         error_msg_and_die(_("The server denied your request."));
     }
 
@@ -459,26 +573,25 @@ static int create(bool delete_temp_archive,
     /* get raw size */
     if (coredump)
     {
-        xstat(coredump, &file_stat);
+        g_stat(coredump, &file_stat);
         unpacked_size = (long long)file_stat.st_size;
     }
     else if (dump_dir_name != NULL)
     {
         struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags*/ 0);
         if (!dd)
-            xfunc_die(); /* dd_opendir already emitted error message */
+            libreport_xfunc_die(); /* dd_opendir already emitted error message */
         if (dd_exist(dd, FILENAME_VMCORE))
             task_type = TASK_VMCORE;
         dd_close(dd);
 
-        char *path;
+        g_autofree char *path = NULL;
         int i = 0;
         const char **required_files = task_type == TASK_VMCORE ? required_vmcore : required_retrace;
         while (required_files[i])
         {
-            path = concat_path_file(dump_dir_name, required_files[i]);
-            xstat(path, &file_stat);
-            free(path);
+            path = g_build_filename(dump_dir_name, required_files[i], NULL);
+            g_stat(path, &file_stat);
 
             if (!S_ISREG(file_stat.st_mode))
                 error_msg_and_die(_("'%s' must be a regular file in "
@@ -493,7 +606,7 @@ static int create(bool delete_temp_archive,
         {
             for (i = 0; optional_retrace[i]; ++i)
             {
-                path = concat_path_file(dump_dir_name, optional_retrace[i]);
+                path = g_build_filename(dump_dir_name, optional_retrace[i], NULL);
                 if (stat(path, &file_stat) != -1)
                 {
                     if (!S_ISREG(file_stat.st_mode))
@@ -503,7 +616,6 @@ static int create(bool delete_temp_archive,
 
                     unpacked_size += (long long)file_stat.st_size;
                 }
-                free(path);
             }
         }
     }
@@ -523,22 +635,22 @@ static int create(bool delete_temp_archive,
                             size, max_size);
     }
 
-    if (settings->supported_formats)
     {
-        int i;
         bool supported = false;
-        for (i = 0; i < MAX_FORMATS && settings->supported_formats[i]; ++i)
+        for (int i = 0; i < MAX_FORMATS && settings->supported_formats[i]; ++i)
+        {
             if (strcmp("application/x-xz-compressed-tar", settings->supported_formats[i]) == 0)
             {
                 supported = true;
                 break;
             }
+        }
 
         if (!supported)
         {
-            alert_server_error(cfg.url);
-            error_msg_and_die(_("The server does not support "
-                                "xz-compressed tarballs."));
+            alert_server_error(cfg.uri);
+            error_msg_and_die(_("The server does not support"
+                                " xz-compressed tarballs."));
         }
     }
 
@@ -547,60 +659,56 @@ static int create(bool delete_temp_archive,
     {
         struct dump_dir *dd = dd_opendir(dump_dir_name, DD_OPEN_READONLY);
         if (!dd)
-            xfunc_die();
+            libreport_xfunc_die();
         problem_data_t *pd = create_problem_data_from_dump_dir(dd);
         dd_close(dd);
 
         char *package = problem_data_get_content_or_NULL(pd, FILENAME_PACKAGE);
         char *arch = problem_data_get_content_or_NULL(pd, FILENAME_ARCHITECTURE);
-        map_string_t *osinfo = new_map_string();
+        g_autoptr(GHashTable) osinfo = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
         problem_data_get_osinfo(pd, osinfo);
 
         /* not needed for TASK_VMCORE - the information is kept in the vmcore itself */
-        if (settings->supported_releases)
         {
-            char *releaseid = get_release_id(osinfo, arch);
+            g_autofree char *releaseid = get_release_id(osinfo, arch);
             if (!releaseid)
                 error_msg_and_die("Unable to parse release.");
 
-            int i;
             bool supported = false;
-            for (i = 0; i < MAX_RELEASES && settings->supported_releases[i]; ++i)
+            for (int i = 0; i < MAX_RELEASES && settings->supported_releases[i]; ++i)
+            {
                 if (strcmp(releaseid, settings->supported_releases[i]) == 0)
                 {
                     supported = true;
                     break;
                 }
+            }
 
             if (!supported)
             {
-                char *msg = xasprintf(_("The release '%s' is not supported by the"
-                                        " Retrace server."), releaseid);
-                alert(msg);
-                free(msg);
+                g_autofree char *msg =
+                    g_strdup_printf(_("The release '%s' is not supported by the"
+                                      " Retrace server."), releaseid);
+                libreport_alert(msg);
                 error_msg_and_die(_("The server is not able to"
                                     " handle your request."));
             }
-
-            free(releaseid);
         }
 
         /* not relevant for vmcores - it may take a long time to get package from vmcore */
         if (!no_pkgcheck)
         {
-            char *msg;
-            int known = check_package(package, arch, osinfo, &msg);
+            g_autofree char *msg = NULL;
+            int known = check_package(session, package, arch, osinfo, &msg);
             if (msg)
             {
-                alert(msg);
-                free(msg);
+                libreport_alert(msg);
             }
 
             if (!known)
                 error_msg_and_die(_("Unknown package sent to Retrace server."));
         }
 
-        free_map_string(osinfo);
         problem_data_free(pd);
     }
 
@@ -615,8 +723,10 @@ static int create(bool delete_temp_archive,
         return 1;
 
     /* Get the file size. */
-    fstat(tempfd, &file_stat);
-    gchar *human_size = g_format_size_full((long long)file_stat.st_size, G_FORMAT_SIZE_IEC_UNITS);
+    if (-1 == fstat(tempfd, &file_stat))
+        perror_msg_and_die("Could not get information about opened file");
+
+    g_autofree gchar *human_size = g_format_size_full((long long)file_stat.st_size, G_FORMAT_SIZE_IEC_UNITS);
     if ((long long)file_stat.st_size > settings->max_packed_size)
     {
         alert_crash_too_large();
@@ -637,107 +747,63 @@ static int create(bool delete_temp_archive,
 
     if (size_mb > 8) /* 8 MB - should be configurable */
     {
-        char *question = xasprintf(_("You are going to upload %s. "
-                                     "Continue?"), human_size);
+        g_autofree char *question = g_strdup_printf(_("You are going to upload %s. "
+                                           "Continue?"), human_size);
 
-        int response = ask_yes_no(question);
-        free(question);
+        int response = libreport_ask_yes_no(question);
 
         if (!response)
         {
-            set_xfunc_error_retval(EXIT_CANCEL_BY_USER);
+            libreport_set_xfunc_error_retval(EXIT_CANCEL_BY_USER);
             error_msg_and_die(_("Cancelled by user"));
         }
     }
 
-    PRFileDesc *tcp_sock, *ssl_sock;
-    ssl_connect(&cfg, &tcp_sock, &ssl_sock);
-    /* Upload the archive. */
-    struct strbuf *http_request = strbuf_new();
-    strbuf_append_strf(http_request,
-                       "POST /create HTTP/1.1\r\n"
-                       "Host: %s\r\n"
-                       "Content-Type: application/x-xz-compressed-tar\r\n"
-                       "Content-Length: %lld\r\n"
-                       "Connection: close\r\n"
-                       "X-Task-Type: %d\r\n"
-                       "%s"
-                       "%s"
-                       "\r\n",
-                       cfg.url, (long long)file_stat.st_size, task_type,
-                       lang.accept_charset,
-                       lang.accept_language
-    );
+    g_autoptr(SoupURI) uri = NULL;
+    g_autoptr(SoupMessage) message = NULL;
+    g_autoptr(GMappedFile) file = NULL;
+    char *contents;
+    g_autofree char *task_type_string = NULL;
+    g_autofree CreateProgressCallbackData *callback_data = NULL;
+    guint response_code;
+    g_autoptr(SoupBuffer) response = NULL;
+    const char *header_value;
 
-    PRInt32 written = PR_Send(tcp_sock, http_request->buf, http_request->len,
-                              /*flags:*/0, PR_INTERVAL_NO_TIMEOUT);
-    if (written == -1)
-    {
-        alert_connection_error(cfg.url);
-        error_msg_and_die(_("Failed to send HTTP header of length %d: NSS error %d"),
-                          http_request->len, PR_GetError());
-    }
+    uri = build_uri_from_config(&cfg, "create", NULL);
+    message = soup_message_new_from_uri("POST", uri);
+    file = g_mapped_file_new_from_fd(tempfd, FALSE, NULL);
+    contents = g_mapped_file_get_contents(file);
+    task_type_string = g_strdup_printf("%d", task_type);
+
+    soup_message_set_request(message, "application/x-xz-compressed-tar",
+                             SOUP_MEMORY_TEMPORARY, contents, file_stat.st_size);
+
+    soup_message_headers_append(message->request_headers, "X-Task-Type", task_type_string);
+    soup_message_headers_append(message->request_headers, "Accept-Charset", lang.charset);
 
     if (delay)
     {
         printf(_("Uploading %s\n"), human_size);
         fflush(stdout);
+
+        callback_data = g_new0(CreateProgressCallbackData, 1);
+
+        time(&callback_data->start);
+
+        g_signal_connect(message, "wrote-body-data",
+                         G_CALLBACK(on_wrote_body_data), &callback_data);
     }
 
-    g_free(human_size);
+    response_code = soup_session_send_message(session, message);
 
-    strbuf_free(http_request);
-    int result = 0;
-    int i;
-    char buf[32768];
-
-    time_t start, now;
-    time(&start);
-
-    for (i = 0;; ++i)
+    if (SOUP_STATUS_IS_TRANSPORT_ERROR(response_code))
     {
-        if (delay)
-        {
-            time(&now);
-            if (now - start >= delay)
-            {
-                time(&start);
-                int progress = 100 * i * sizeof(buf) / file_stat.st_size;
-                if (progress > 100)
-                    continue;
-
-                printf(_("Uploading %d%%\n"), progress);
-                fflush(stdout);
-            }
-        }
-
-        int r = read(tempfd, buf, sizeof(buf));
-        if (r <= 0)
-        {
-            if (r == -1)
-            {
-                if (EINTR == errno || EAGAIN == errno || EWOULDBLOCK == errno)
-                    continue;
-                perror_msg_and_die(_("Failed to read from a pipe"));
-            }
-            break;
-        }
-        written = PR_Send(tcp_sock, buf, r,
-                          /*flags:*/0, PR_INTERVAL_NO_TIMEOUT);
-        if (written == -1)
-        {
-            /* Print error message, but do not exit.  We need to check
-               if the server send some explanation regarding the
-               error. */
-            result = 1;
-            alert_connection_error(cfg.url);
-            error_msg(_("Failed to send data: NSS error %d (%s): %s"),
-                      PR_GetError(),
-                      PR_ErrorToName(PR_GetError()),
-                      PR_ErrorToString(PR_GetError(), PR_LANGUAGE_I_DEFAULT));
-            break;
-        }
+        alert_connection_error(cfg.uri);
+        error_msg("%s", message->reason_phrase);
     }
+
+    response = soup_message_body_flatten(message->response_body);
+
     close(tempfd);
 
     if (delay)
@@ -746,49 +812,47 @@ static int create(bool delete_temp_archive,
         fflush(stdout);
     }
 
-    /* Read the HTTP header of the response from server. */
-    char *http_response = tcp_read_response(tcp_sock);
-    char *http_body = http_get_body(http_response);
-    if (!http_body)
-    {
-        alert_server_error(cfg.url);
-        error_msg_and_die(_("Invalid response from server: missing HTTP message body."));
-    }
     if (http_show_headers)
-        http_print_headers(stderr, http_response);
-    int response_code = http_get_response_code(http_response);
+    {
+        soup_message_headers_foreach(message->response_headers, print_header, stderr);
+    }
+
     if (response_code == 500 || response_code == 507)
     {
-        alert_server_error(cfg.url);
-        error_msg_and_die(http_body);
+        alert_server_error(cfg.uri);
+        error_msg_and_die("%s", response->data);
     }
     else if (response_code == 403)
     {
-        alert(_("Your problem directory is corrupted and can not "
+        libreport_alert(_("Your problem directory is corrupted and can not "
                 "be processed by the Retrace server."));
         error_msg_and_die(_("The archive contains malicious files (such as symlinks) "
                             "and thus can not be processed."));
     }
     else if (response_code != 201)
     {
-        alert_server_error(cfg.url);
-        error_msg_and_die(_("Unexpected HTTP response from server: %d\n%s"), response_code, http_body);
+        alert_server_error(cfg.uri);
+        error_msg_and_die(_("Unexpected HTTP response from server: %d\n%s"),
+                          response_code, response->data);
     }
-    free(http_body);
-    *task_id = http_get_header_value(http_response, "X-Task-Id");
-    if (!*task_id)
+
+    header_value = soup_message_headers_get_one(message->response_headers, "X-Task-Id");
+    if (header_value == NULL)
     {
-        alert_server_error(cfg.url);
+        alert_server_error(cfg.uri);
         error_msg_and_die(_("Invalid response from server: missing X-Task-Id."));
     }
-    *task_password = http_get_header_value(http_response, "X-Task-Password");
-    if (!*task_password)
+
+    *task_id = g_strdup(header_value);
+
+    header_value = soup_message_headers_get_one(message->response_headers, "X-Task-Password");
+    if (header_value == NULL)
     {
-        alert_server_error(cfg.url);
+        alert_server_error(cfg.uri);
         error_msg_and_die(_("Invalid response from server: missing X-Task-Password."));
     }
-    free(http_response);
-    ssl_disconnect(ssl_sock);
+
+    *task_password = g_strdup(header_value);
 
     if (delay)
     {
@@ -796,147 +860,130 @@ static int create(bool delete_temp_archive,
         fflush(stdout);
     }
 
-    return result;
+    return 0;
 }
 
-static int run_create(bool delete_temp_archive)
+static int run_create(SoupSession *session,
+                      bool         delete_temp_archive)
 {
-    char *task_id, *task_password;
-    int result = create(delete_temp_archive, &task_id, &task_password);
+    g_autofree char *task_id = NULL;
+    g_autofree char *task_password = NULL;
+    int result = create(session, delete_temp_archive, &task_id, &task_password);
     if (0 != result)
         return result;
     printf(_("Task Id: %s\nTask Password: %s\n"), task_id, task_password);
-    free(task_id);
-    free(task_password);
     return 0;
 }
 
 /* Caller must free task_status and status_message */
-static void status(const char *task_id,
-                   const char *task_password,
-                   char **task_status,
-                   char **status_message)
+static void status(SoupSession  *session,
+                   const char   *task_id,
+                   const char   *task_password,
+                   char        **task_status,
+                   char        **status_message)
 {
-    PRFileDesc *tcp_sock, *ssl_sock;
-    ssl_connect(&cfg, &tcp_sock, &ssl_sock);
-    struct strbuf *http_request = strbuf_new();
-    strbuf_append_strf(http_request,
-                       "GET /%s HTTP/1.1\r\n"
-                       "Host: %s\r\n"
-                       "X-Task-Password: %s\r\n"
-                       "Content-Length: 0\r\n"
-                       "Connection: close\r\n"
-                       "%s"
-                       "%s"
-                       "\r\n",
-                       task_id, cfg.url, task_password,
-                       lang.accept_charset,
-                       lang.accept_language
-    );
+    g_autoptr(SoupURI) uri = NULL;
+    g_autoptr(SoupMessage) message = NULL;
+    guint response_code;
+    g_autoptr(SoupBuffer) response = NULL;
+    const char *task_status_header;
 
-    PRInt32 written = PR_Send(tcp_sock, http_request->buf, http_request->len,
-                              /*flags:*/0, PR_INTERVAL_NO_TIMEOUT);
-    if (written == -1)
+    uri = build_uri_from_config(&cfg, task_id, NULL);
+    message = soup_message_new_from_uri("GET", uri);
+
+    soup_message_headers_append(message->request_headers, "X-Task-Password", task_password);
+    soup_message_headers_append(message->request_headers, "Accept-Charset", lang.charset);
+
+    response_code = soup_session_send_message(session, message);
+
+    if (SOUP_STATUS_IS_TRANSPORT_ERROR(response_code))
     {
-        alert_connection_error(cfg.url);
-        error_msg_and_die(_("Failed to send HTTP header of length %d: NSS error %d"),
-                          http_request->len, PR_GetError());
+        alert_connection_error(cfg.uri);
+        error_msg_and_die("%s", message->reason_phrase);
     }
-    strbuf_free(http_request);
-    char *http_response = tcp_read_response(tcp_sock);
-    char *http_body = http_get_body(http_response);
-    if (!*http_body)
-    {
-        alert_server_error(cfg.url);
-        error_msg_and_die(_("Invalid response from server: missing HTTP message body."));
-    }
+
+    response = soup_message_body_flatten(message->response_body);
+
     if (http_show_headers)
-        http_print_headers(stderr, http_response);
-    int response_code = http_get_response_code(http_response);
+    {
+        soup_message_headers_foreach(message->response_headers, print_header, stderr);
+    }
+
     if (response_code != 200)
     {
-        alert_server_error(cfg.url);
+        alert_server_error(cfg.uri);
         error_msg_and_die(_("Unexpected HTTP response from server: %d\n%s"),
-                          response_code, http_body);
+                          response_code, response->data);
     }
-    *task_status = http_get_header_value(http_response, "X-Task-Status");
-    if (!*task_status)
+
+    task_status_header = soup_message_headers_get_one(message->response_headers, "X-Task-Status");
+    if (task_status_header == NULL)
     {
-        alert_server_error(cfg.url);
+        alert_server_error(cfg.uri);
         error_msg_and_die(_("Invalid response from server: missing X-Task-Status."));
     }
-    *status_message = http_body;
-    free(http_response);
-    ssl_disconnect(ssl_sock);
+    *task_status = g_strdup(task_status_header);
+    *status_message = g_strdup(response->data);
 }
 
-static void run_status(const char *task_id, const char *task_password)
+static void run_status(SoupSession *session,
+                       const char  *task_id,
+                       const char  *task_password)
 {
-    char *task_status;
-    char *status_message;
-    status(task_id, task_password, &task_status, &status_message);
+    g_autofree char *task_status = NULL;
+    g_autofree char *status_message = NULL;
+    status(session, task_id, task_password, &task_status, &status_message);
     printf(_("Task Status: %s\n%s\n"), task_status, status_message);
-    free(task_status);
-    free(status_message);
 }
 
 /* Caller must free backtrace */
-static void backtrace(const char *task_id, const char *task_password,
-                      char **backtrace)
+static void backtrace(SoupSession  *session,
+                      const char   *task_id,
+                      const char   *task_password,
+                      char        **backtrace)
 {
-    PRFileDesc *tcp_sock, *ssl_sock;
-    ssl_connect(&cfg, &tcp_sock, &ssl_sock);
-    struct strbuf *http_request = strbuf_new();
-    strbuf_append_strf(http_request,
-                       "GET /%s/backtrace HTTP/1.1\r\n"
-                       "Host: %s\r\n"
-                       "X-Task-Password: %s\r\n"
-                       "Content-Length: 0\r\n"
-                       "Connection: close\r\n"
-                       "%s"
-                       "%s"
-                       "\r\n",
-                       task_id, cfg.url, task_password,
-                       lang.accept_charset,
-                       lang.accept_language
-    );
+    g_autoptr(SoupURI) uri = NULL;
+    g_autoptr(SoupMessage) message = NULL;
+    guint response_code;
+    g_autoptr(SoupBuffer) response = NULL;
 
-    PRInt32 written = PR_Send(tcp_sock, http_request->buf, http_request->len,
-                              /*flags:*/0, PR_INTERVAL_NO_TIMEOUT);
-    if (written == -1)
+    uri = build_uri_from_config(&cfg, task_id, "backtrace", NULL);
+    message = soup_message_new_from_uri("GET", uri);
+
+    soup_message_headers_append(message->request_headers, "X-Task-Password", task_password);
+    soup_message_headers_append(message->request_headers, "Accept-Charset", lang.charset);
+
+    response_code = soup_session_send_message(session, message);
+
+    if (SOUP_STATUS_IS_TRANSPORT_ERROR(response_code))
     {
-        alert_connection_error(cfg.url);
-        error_msg_and_die(_("Failed to send HTTP header of length %d: NSS error %d."),
-                          http_request->len, PR_GetError());
+        alert_connection_error(cfg.uri);
+        error_msg_and_die("%s", message->reason_phrase);
     }
-    strbuf_free(http_request);
-    char *http_response = tcp_read_response(tcp_sock);
-    char *http_body = http_get_body(http_response);
-    if (!http_body)
-    {
-        alert_server_error(cfg.url);
-        error_msg_and_die(_("Invalid response from server: missing HTTP message body."));
-    }
+
+    response = soup_message_body_flatten(message->response_body);
+
     if (http_show_headers)
-        http_print_headers(stderr, http_response);
-    int response_code = http_get_response_code(http_response);
+    {
+        soup_message_headers_foreach(message->response_headers, print_header, stderr);
+    }
+
     if (response_code != 200)
     {
-        alert_server_error(cfg.url);
+        alert_server_error(cfg.uri);
         error_msg_and_die(_("Unexpected HTTP response from server: %d\n%s"),
-                          response_code, http_body);
+                          response_code, response->data);
     }
-    *backtrace = http_body;
-    free(http_response);
-    ssl_disconnect(ssl_sock);
-}
 
-static void run_backtrace(const char *task_id, const char *task_password)
+    *backtrace = g_strdup(response->data);
+}
+static void run_backtrace(SoupSession *session,
+                          const char  *task_id,
+                          const char  *task_password)
 {
-    char *backtrace_text;
-    backtrace(task_id, task_password, &backtrace_text);
+    g_autofree char *backtrace_text = NULL;
+    backtrace(session, task_id, task_password, &backtrace_text);
     printf("%s", backtrace_text);
-    free(backtrace_text);
 }
 
 /* This is not robust at all but will work for now */
@@ -955,144 +1002,125 @@ static int get_exploitable_rating(const char *exploitable_text)
 }
 
 /* Caller must free exploitable_text */
-static void exploitable(const char *task_id, const char *task_password,
-                        char **exploitable_text)
+static void exploitable(SoupSession  *session,
+                        const char   *task_id,
+                        const char   *task_password,
+                        char        **exploitable_text)
 {
-    PRFileDesc *tcp_sock, *ssl_sock;
-    ssl_connect(&cfg, &tcp_sock, &ssl_sock);
-    struct strbuf *http_request = strbuf_new();
-    strbuf_append_strf(http_request,
-                       "GET /%s/exploitable HTTP/1.1\r\n"
-                       "Host: %s\r\n"
-                       "X-Task-Password: %s\r\n"
-                       "Content-Length: 0\r\n"
-                       "Connection: close\r\n"
-                       "%s"
-                       "%s"
-                       "\r\n",
-                       task_id, cfg.url, task_password,
-                       lang.accept_charset,
-                       lang.accept_language
-    );
+    g_autoptr(SoupURI) uri = NULL;
+    g_autoptr(SoupMessage) message = NULL;
+    guint response_code;
+    g_autoptr(SoupBuffer) response = NULL;
 
-    PRInt32 written = PR_Send(tcp_sock, http_request->buf, http_request->len,
-                              /*flags:*/0, PR_INTERVAL_NO_TIMEOUT);
-    if (written == -1)
+    uri = build_uri_from_config(&cfg, task_id, "exploitable", NULL);
+    message = soup_message_new_from_uri("GET", uri);
+
+    soup_message_headers_append(message->request_headers, "X-Task-Password", task_password);
+    soup_message_headers_append(message->request_headers, "Accept-Charset", lang.charset);
+
+    response_code = soup_session_send_message(session, message);
+
+    if (SOUP_STATUS_IS_TRANSPORT_ERROR(response_code))
     {
-        alert_connection_error(cfg.url);
-        error_msg_and_die(_("Failed to send HTTP header of length %d: NSS error %d."),
-                          http_request->len, PR_GetError());
+        alert_connection_error(cfg.uri);
+        error_msg_and_die("%s", message->reason_phrase);
     }
-    strbuf_free(http_request);
-    char *http_response = tcp_read_response(tcp_sock);
-    char *http_body = http_get_body(http_response);
-    if (!http_body)
-    {
-        alert_server_error(cfg.url);
-        error_msg_and_die(_("Invalid response from server: missing HTTP message body."));
-    }
+
+    response = soup_message_body_flatten(message->response_body);
+
     if (http_show_headers)
-        http_print_headers(stderr, http_response);
-    int response_code = http_get_response_code(http_response);
+    {
+        soup_message_headers_foreach(message->response_headers, print_header, stderr);
+    }
 
-    free(http_response);
-    ssl_disconnect(ssl_sock);
-
-    /* 404 = exploitability results not available
-       200 = OK
-       anything else = error */
     if (response_code == 404)
+    {
         *exploitable_text = NULL;
+    }
     else if (response_code == 200)
-        *exploitable_text = http_body;
+    {
+        *exploitable_text = g_strdup(response->data);
+    }
     else
     {
-        alert_server_error(cfg.url);
+        alert_server_error(cfg.uri);
         error_msg_and_die(_("Unexpected HTTP response from server: %d\n%s"),
-                          response_code, http_body);
+                          response_code, response->data);
     }
 }
 
-static void run_exploitable(const char *task_id, const char *task_password)
+static void run_exploitable(SoupSession *session,
+                            const char  *task_id,
+                            const char  *task_password)
 {
-    char *exploitable_text;
-    exploitable(task_id, task_password, &exploitable_text);
+    g_autofree char *exploitable_text = NULL;
+    exploitable(session, task_id, task_password, &exploitable_text);
     if (exploitable_text)
     {
         printf("%s\n", exploitable_text);
-        free(exploitable_text);
     }
     else
         puts("No exploitability information available.");
 }
 
-static void run_log(const char *task_id, const char *task_password)
+static void run_log(SoupSession *session,
+                    const char  *task_id,
+                    const char  *task_password)
 {
-    PRFileDesc *tcp_sock, *ssl_sock;
-    ssl_connect(&cfg, &tcp_sock, &ssl_sock);
-    struct strbuf *http_request = strbuf_new();
-    strbuf_append_strf(http_request,
-                       "GET /%s/log HTTP/1.1\r\n"
-                       "Host: %s\r\n"
-                       "X-Task-Password: %s\r\n"
-                       "Content-Length: 0\r\n"
-                       "Connection: close\r\n"
-                       "%s"
-                       "%s"
-                       "\r\n",
-                       task_id, cfg.url, task_password,
-                       lang.accept_charset,
-                       lang.accept_language
-    );
+    g_autoptr(SoupURI) uri = NULL;
+    g_autoptr(SoupMessage) message = NULL;
+    guint response_code;
+    g_autoptr(SoupBuffer) response = NULL;
 
-    PRInt32 written = PR_Send(tcp_sock, http_request->buf, http_request->len,
-                              /*flags:*/0, PR_INTERVAL_NO_TIMEOUT);
-    if (written == -1)
+    uri = build_uri_from_config(&cfg, task_id, "log", NULL);
+    message = soup_message_new_from_uri("GET", uri);
+
+    soup_message_headers_append(message->request_headers, "X-Task-Password", task_password);
+    soup_message_headers_append(message->request_headers, "Accept-Charset", lang.charset);
+
+    response_code = soup_session_send_message(session, message);
+
+    if (SOUP_STATUS_IS_TRANSPORT_ERROR(response_code))
     {
-        alert_connection_error(cfg.url);
-        error_msg_and_die(_("Failed to send HTTP header of length %d: NSS error %d."),
-                          http_request->len, PR_GetError());
+        alert_connection_error(cfg.uri);
+        error_msg_and_die("%s", message->reason_phrase);
     }
-    strbuf_free(http_request);
-    char *http_response = tcp_read_response(tcp_sock);
-    char *http_body = http_get_body(http_response);
-    if (!http_body)
-    {
-        alert_server_error(cfg.url);
-        error_msg_and_die(_("Invalid response from server: missing HTTP message body."));
-    }
+
+    response = soup_message_body_flatten(message->response_body);
+
     if (http_show_headers)
-        http_print_headers(stderr, http_response);
-    int response_code = http_get_response_code(http_response);
+    {
+        soup_message_headers_foreach(message->response_headers, print_header, stderr);
+    }
+
     if (response_code != 200)
     {
-        alert_server_error(cfg.url);
+        alert_server_error(cfg.uri);
         error_msg_and_die(_("Unexpected HTTP response from server: %d\n%s"),
-                          response_code, http_body);
+                          response_code, response->data);
     }
-    puts(http_body);
-    free(http_body);
-    free(http_response);
-    ssl_disconnect(ssl_sock);
+
+    puts(response->data);
 }
 
-static int run_batch(bool delete_temp_archive)
+static int run_batch(SoupSession *session,
+                     bool         delete_temp_archive)
 {
-    char *task_id, *task_password;
-    int retcode = create(delete_temp_archive, &task_id, &task_password);
+    g_autofree char *task_id = NULL;
+    g_autofree char *task_password = NULL;
+    int retcode = create(session, delete_temp_archive, &task_id, &task_password);
     if (0 != retcode)
         return retcode;
-    char *task_status = xstrdup("");
-    char *status_message = xstrdup("");
+    g_autofree char *task_status = g_strdup("");
+    g_autofree char *status_message = g_strdup("");
     int status_delay = delay ? delay : 10;
     int dots = 0;
     while (0 != strncmp(task_status, "FINISHED", strlen("finished")))
     {
-        char *previous_status_message = status_message;
-        free(task_status);
+        g_autofree char *previous_status_message = status_message;
         sleep(status_delay);
-        status(task_id, task_password, &task_status, &status_message);
-        if (g_verbose > 0 || 0 != strcmp(previous_status_message, status_message))
+        status(session, task_id, task_password, &task_status, &status_message);
+        if (libreport_g_verbose > 0 || 0 != strcmp(previous_status_message, status_message))
         {
             if (dots)
             {   /* A same message was received and a period was printed instead
@@ -1113,20 +1141,18 @@ static int run_batch(bool delete_temp_archive)
                 putchar('\n');
             }
             ++dots;
-            client_log(".");
+            libreport_client_log(".");
             fflush(stdout);
         }
-        free(previous_status_message);
-        previous_status_message = status_message;
     }
     if (0 == strcmp(task_status, "FINISHED_SUCCESS"))
     {
-        char *backtrace_text;
-        backtrace(task_id, task_password, &backtrace_text);
-        char *exploitable_text = NULL;
+        g_autofree char *backtrace_text = NULL;
+        backtrace(session, task_id, task_password, &backtrace_text);
+        g_autofree char *exploitable_text = NULL;
         if (task_type == TASK_RETRACE)
         {
-            exploitable(task_id, task_password, &exploitable_text);
+            exploitable(session, task_id, task_password, &exploitable_text);
             if (!exploitable_text)
                 log_notice("No exploitable data available");
         }
@@ -1136,8 +1162,7 @@ static int run_batch(bool delete_temp_archive)
             struct dump_dir *dd = dd_opendir(dump_dir_name, 0/* flags */);
             if (!dd)
             {
-                free(backtrace_text);
-                xfunc_die();
+                libreport_xfunc_die();
             }
 
             /* the result of TASK_VMCORE is not backtrace, but kernel log */
@@ -1162,20 +1187,14 @@ static int run_batch(bool delete_temp_archive)
             if (exploitable_text)
                 printf("%s\n", exploitable_text);
         }
-        free(backtrace_text);
-        free(exploitable_text);
     }
     else
     {
-        alert(_("Retrace failed. Try again later and if the problem persists "
+        libreport_alert(_("Retrace failed. Try again later and if the problem persists "
                 "report this issue please."));
-        run_log(task_id, task_password);
+        run_log(session, task_id, task_password);
         retcode = 1;
     }
-    free(task_status);
-    free(status_message);
-    free(task_id);
-    free(task_password);
     return retcode;
 }
 
@@ -1198,32 +1217,29 @@ int main(int argc, char **argv)
         OPT_syslog    = 1 << 1,
         OPT_insecure  = 1 << 2,
         OPT_no_pkgchk = 1 << 3,
-        OPT_url       = 1 << 4,
-        OPT_port      = 1 << 5,
-        OPT_headers   = 1 << 6,
-        OPT_group_1   = 1 << 7,
-        OPT_dir       = 1 << 8,
-        OPT_core      = 1 << 9,
-        OPT_delay     = 1 << 10,
-        OPT_no_unlink = 1 << 11,
-        OPT_group_2   = 1 << 12,
-        OPT_task      = 1 << 13,
-        OPT_password  = 1 << 14
+        OPT_uri       = 1 << 4,
+        OPT_headers   = 1 << 5,
+        OPT_group_1   = 1 << 6,
+        OPT_dir       = 1 << 7,
+        OPT_core      = 1 << 8,
+        OPT_delay     = 1 << 9,
+        OPT_no_unlink = 1 << 10,
+        OPT_group_2   = 1 << 11,
+        OPT_task      = 1 << 12,
+        OPT_password  = 1 << 13
     };
 
     /* Keep enum above and order of options below in sync! */
     struct options options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_BOOL('s', "syslog", NULL, _("log to syslog")),
         OPT_BOOL('k', "insecure", NULL,
                  _("allow insecure connection to retrace server")),
         OPT_BOOL(0, "no-pkgcheck", NULL,
                  _("do not check whether retrace server is able to "
                    "process given package before uploading the archive")),
-        OPT_STRING(0, "url", &(cfg.url), "URL",
-                   _("retrace server URL")),
-        OPT_INTEGER(0, "port", &(cfg.port),
-                    _("retrace server port")),
+        OPT_STRING(0, "uri", &(cfg.uri), "URI",
+                   _("retrace server URI")),
         OPT_BOOL(0, "headers", NULL,
                  _("(debug) show received HTTP headers")),
         OPT_GROUP(_("For create and batch operations")),
@@ -1247,42 +1263,46 @@ int main(int argc, char **argv)
     const char *usage = _("abrt-retrace-client <operation> [options]\n"
         "Operations: create/status/backtrace/log/batch/exploitable");
 
-    char *env_url = getenv("RETRACE_SERVER_URL");
-    if (env_url)
-        cfg.url = env_url;
-
-    char *env_port = getenv("RETRACE_SERVER_PORT");
-    if (env_port)
-        cfg.port = xatou(env_port);
+    char *env_uri = getenv("RETRACE_SERVER_URI");
+    if (env_uri)
+        cfg.uri = env_uri;
 
     char *env_delay = getenv("ABRT_STATUS_DELAY");
     if (env_delay)
-        delay = xatou(env_delay);
+    {
+        char *endptr;
+        long dly = g_ascii_strtoull(env_delay, &endptr, 10);
+        if (dly >= 0 && dly <= UINT_MAX && env_delay != endptr)
+            delay = (unsigned)dly;
+        else
+            error_msg_and_die("expected number in range <%d, %d>: '%s'", 0, UINT_MAX, env_delay);
+    }
 
     char *env_insecure = getenv("RETRACE_SERVER_INSECURE");
     if (env_insecure)
         cfg.ssl_allow_insecure = strncmp(env_insecure, "insecure", strlen("insecure")) == 0;
 
-    unsigned opts = parse_opts(argc, argv, options, usage);
+    unsigned opts = libreport_parse_opts(argc, argv, options, usage);
     if (opts & OPT_syslog)
     {
-        logmode = LOGMODE_JOURNAL;
+        libreport_logmode = LOGMODE_JOURNAL;
     }
     const char *operation = NULL;
     if (optind < argc)
         operation = argv[optind];
     else
-        show_usage_and_die(usage, options);
+        libreport_show_usage_and_die(usage, options);
 
     if (!cfg.ssl_allow_insecure)
         cfg.ssl_allow_insecure = opts & OPT_insecure;
     http_show_headers = opts & OPT_headers;
     no_pkgcheck = opts & OPT_no_pkgchk;
 
-    /* Initialize NSS */
-    SECMODModule *mod;
-    PK11GenericObject *cert;
-    nss_init(&mod, &cert);
+    g_autoptr(SoupSession) session = NULL;
+
+    session = soup_session_new_with_options(SOUP_SESSION_SSL_STRICT, !cfg.ssl_allow_insecure,
+                                            SOUP_SESSION_ACCEPT_LANGUAGE_AUTO, TRUE,
+                                            NULL);
 
     /* Run the desired operation. */
     int result = 0;
@@ -1290,13 +1310,13 @@ int main(int argc, char **argv)
     {
         if (!dump_dir_name && !coredump)
             error_msg_and_die(_("Either problem directory or coredump is needed."));
-        result = run_create(0 == (opts & OPT_no_unlink));
+        result = run_create(session, 0 == (opts & OPT_no_unlink));
     }
     else if (0 == strcasecmp(operation, "batch"))
     {
         if (!dump_dir_name && !coredump)
             error_msg_and_die(_("Either problem directory or coredump is needed."));
-        result = run_batch(0 == (opts & OPT_no_unlink));
+        result = run_batch(session, 0 == (opts & OPT_no_unlink));
     }
     else if (0 == strcasecmp(operation, "status"))
     {
@@ -1304,7 +1324,7 @@ int main(int argc, char **argv)
             error_msg_and_die(_("Task id is needed."));
         if (!task_password)
             error_msg_and_die(_("Task password is needed."));
-        run_status(task_id, task_password);
+        run_status(session, task_id, task_password);
     }
     else if (0 == strcasecmp(operation, "backtrace"))
     {
@@ -1312,7 +1332,7 @@ int main(int argc, char **argv)
             error_msg_and_die(_("Task id is needed."));
         if (!task_password)
             error_msg_and_die(_("Task password is needed."));
-        run_backtrace(task_id, task_password);
+        run_backtrace(session, task_id, task_password);
     }
     else if (0 == strcasecmp(operation, "log"))
     {
@@ -1320,7 +1340,7 @@ int main(int argc, char **argv)
             error_msg_and_die(_("Task id is needed."));
         if (!task_password)
             error_msg_and_die(_("Task password is needed."));
-        run_log(task_id, task_password);
+        run_log(session, task_id, task_password);
     }
     else if (0 == strcasecmp(operation, "exploitable"))
     {
@@ -1328,13 +1348,10 @@ int main(int argc, char **argv)
             error_msg_and_die(_("Task id is needed."));
         if (!task_password)
             error_msg_and_die(_("Task password is needed."));
-        run_exploitable(task_id, task_password);
+        run_exploitable(session, task_id, task_password);
     }
     else
         error_msg_and_die(_("Unknown operation: %s."), operation);
-
-    /* Shutdown NSS. */
-    nss_close(mod, cert);
 
     return result;
 }

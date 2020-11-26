@@ -15,7 +15,9 @@
   with this program; if not, write to the Free Software Foundation, Inc.,
   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
+#include <glib-unix.h>
 #include "problem_api.h"
+#include "abrt_glib.h"
 #include "libabrt.h"
 
 /* Maximal length of backtrace. */
@@ -27,6 +29,7 @@
 /* We exit after this many seconds */
 #define TIMEOUT 10
 
+#define ABRT_SERVER_EVENT_ENV "ABRT_SERVER_PID"
 
 /*
 Unix socket in ABRT daemon for creating new dump directories.
@@ -71,22 +74,93 @@ MANDATORY ITEMS:
 You can send more messages using the same KEY=value format.
 */
 
+static int g_signal_pipe[2];
+static struct ns_ids g_ns_ids;
+
+struct waiting_context
+{
+    GMainLoop *main_loop;
+    const char *dirname;
+    int retcode;
+    enum abrt_daemon_reply
+    {
+        ABRT_CONTINUE,
+        ABRT_INTERRUPT,
+    } reply;
+};
+
 static unsigned total_bytes_read = 0;
 
+static pid_t client_pid = (pid_t)-1L;
 static uid_t client_uid = (uid_t)-1L;
 
+static void
+handle_signal(int signo)
+{
+    int save_errno = errno;
+    uint8_t sig_caught = signo;
+    if (write(g_signal_pipe[1], &sig_caught, 1))
+        /* we ignore result, if () shuts up stupid compiler */;
+    errno = save_errno;
+}
+
+static gboolean
+handle_signal_pipe_cb(GIOChannel *gio, GIOCondition condition, gpointer user_data)
+{
+    gsize len = 0;
+    gchar signal = 0;
+
+    for (;;)
+    {
+        GError *error = NULL;
+        /* Only receive one signal at a time. */
+        GIOStatus stat = g_io_channel_read_chars(gio, &signal, 1, &len, NULL);
+        if (stat == G_IO_STATUS_ERROR)
+            error_msg_and_die(_("Can't read from gio channel: '%s'"), error ? error->message : "");
+        if (stat == G_IO_STATUS_EOF)
+            return G_SOURCE_REMOVE;
+        if (stat == G_IO_STATUS_AGAIN)
+            break;
+
+        assert(stat == G_IO_STATUS_NORMAL);
+
+        if (len == 0)
+            continue;
+
+        /* We received a signal. */
+        struct waiting_context *context = (struct waiting_context *)user_data;
+        log_debug("Got signal %d through signal pipe", signal);
+        switch (signal)
+        {
+            case SIGUSR1:
+                context->reply = ABRT_CONTINUE;
+                break;
+            case SIGINT:
+                context->reply = ABRT_INTERRUPT;
+                break;
+            default:
+                error_msg_and_die("Bug - aborting - unsupported signal: %d", signal);
+        }
+
+        g_main_loop_quit(context->main_loop);
+        return G_SOURCE_REMOVE;
+    }
+
+    /* Do not remove this event. */
+    return G_SOURCE_CONTINUE;
+}
 
 /* Remove dump dir */
 static int delete_path(const char *dump_dir_name)
 {
-    /* If doesn't start with "g_settings_dump_location/"... */
-    if (!dir_is_in_dump_location(dump_dir_name))
+    /* If doesn't start with "abrt_g_settings_dump_location/"... */
+    if (!abrt_dir_is_in_dump_location(dump_dir_name))
     {
         /* Then refuse to operate on it (someone is attacking us??) */
-        error_msg("Bad problem directory name '%s', should start with: '%s'", dump_dir_name, g_settings_dump_location);
+        error_msg("Bad problem directory name '%s', should start with: '%s'", dump_dir_name, abrt_g_settings_dump_location);
         return 400; /* Bad Request */
     }
-    if (!dir_has_correct_permissions(dump_dir_name, DD_PERM_DAEMONS))
+    if (!abrt_dir_has_correct_permissions(dump_dir_name, DD_PERM_DAEMONS))
     {
         error_msg("Problem directory '%s' has wrong owner or group", dump_dir_name);
         return 400; /*  */
@@ -142,12 +216,13 @@ static pid_t spawn_event_handler_child(const char *dump_dir_name, const char *ev
     int flags = EXECFLG_INPUT_NUL | EXECFLG_OUTPUT | EXECFLG_QUIET | EXECFLG_ERR2OUT;
     VERB1 flags &= ~EXECFLG_QUIET;
 
-    char *env_vec[2];
+    char *env_vec[3];
     /* Intercept ASK_* messages in Client API -> don't wait for user response */
-    env_vec[0] = xstrdup("REPORT_CLIENT_NONINTERACTIVE=1");
-    env_vec[1] = NULL;
+    env_vec[0] = g_strdup("REPORT_CLIENT_NONINTERACTIVE=1");
+    env_vec[1] = g_strdup_printf("%s=%d", ABRT_SERVER_EVENT_ENV, getpid());
+    env_vec[2] = NULL;
 
-    pid_t child = fork_execv_on_steroids(flags, args, pipeout,
+    pid_t child = libreport_fork_execv_on_steroids(flags, args, pipeout,
                                          env_vec, /*dir:*/ NULL,
                                          /*uid(unused):*/ 0);
     if (fdp)
@@ -155,49 +230,172 @@ static pid_t spawn_event_handler_child(const char *dump_dir_name, const char *ev
     return child;
 }
 
-static int run_post_create(const char *dirname)
+static int problem_dump_dir_was_provoked_by_abrt_event(struct dump_dir *dd, char  **provoker)
 {
-    /* If doesn't start with "g_settings_dump_location/"... */
-    if (!dir_is_in_dump_location(dirname))
+    g_autofree char *env_var = NULL;
+    const int r = dd_get_env_variable(dd, ABRT_SERVER_EVENT_ENV, &env_var);
+
+    /* Dump directory doesn't contain the environ file */
+    if (r == -ENOENT)
+        return 0;
+
+    if (provoker != NULL)
+        *provoker = env_var;
+
+    return env_var != NULL;
+}
+
+static int
+emit_new_problem_signal(gpointer data)
+{
+    struct waiting_context *context = (struct waiting_context *)data;
+
+    const size_t wrote = fprintf(stderr, "NEW_PROBLEM_DETECTED: %s\n", context->dirname);
+    fflush(stderr);
+
+    if (wrote <= 0)
+    {
+        error_msg("Failed to communicate with the daemon");
+        context->retcode = 503;
+        g_main_loop_quit(context->main_loop);
+    }
+
+    log_notice("Emitted new problem signal, waiting for SIGUSR1|SIGINT");
+    return FALSE;
+}
+
+struct response
+{
+    int code;
+    char *message;
+};
+
+#define RESPONSE_SETTER(r, c, m) \
+    do { if (r != NULL) { r->message = m; r->code = c; } else { free(m); }} while (0)
+
+#define RESPONSE_RETURN(r, c ,m) \
+    do { RESPONSE_SETTER(r, c, m); \
+         return c; } while (0)
+
+
+static int run_post_create(const char *dirname, struct response *resp)
+{
+    /* If doesn't start with "abrt_g_settings_dump_location/"... */
+    if (!abrt_dir_is_in_dump_location(dirname))
     {
         /* Then refuse to operate on it (someone is attacking us??) */
-        error_msg("Bad problem directory name '%s', should start with: '%s'", dirname, g_settings_dump_location);
-        return 400; /* Bad Request */
+        error_msg("Bad problem directory name '%s', should start with: '%s'", dirname, abrt_g_settings_dump_location);
+        RESPONSE_RETURN(resp, 400, NULL);
     }
-    if (!dir_has_correct_permissions(dirname, DD_PERM_EVENTS))
+    if (!abrt_dir_has_correct_permissions(dirname, DD_PERM_EVENTS))
     {
         error_msg("Problem directory '%s' has wrong owner or group", dirname);
-        return 400; /*  */
+        RESPONSE_RETURN(resp, 400, NULL);
     }
     /* Check completness */
     {
         struct dump_dir *dd = dd_opendir(dirname, DD_OPEN_READONLY);
+
+        g_autofree char *provoker = NULL;
+        const bool event_dir = dd && problem_dump_dir_was_provoked_by_abrt_event(dd, &provoker);
+        if (event_dir)
+        {
+            if (abrt_g_settings_debug_level == 0)
+            {
+                error_msg("Removing problem provoked by ABRT(pid:%s): '%s'", provoker, dirname);
+                dd_delete(dd);
+            }
+            else
+            {
+                char *dumpdir = NULL;
+                char *event   = NULL;
+                char *reason  = NULL;
+                char *cmdline = NULL;
+
+                /* Ignore errors */
+                dd_get_env_variable(dd, "DUMP_DIR", &dumpdir);
+                dd_get_env_variable(dd, "EVENT",    &event);
+                reason  = dd_load_text(dd, FILENAME_REASON);
+                cmdline = dd_load_text(dd, FILENAME_CMDLINE);
+
+                error_msg("ABRT_SERVER_PID=%s;DUMP_DIR='%s';EVENT='%s';REASON='%s';CMDLINE='%s'",
+                           provoker, dumpdir, event, reason, cmdline);
+
+            }
+
+            return 400;
+        }
+
         const bool complete = dd && problem_dump_dir_is_complete(dd);
         dd_close(dd);
         if (complete)
         {
             error_msg("Problem directory '%s' has already been processed", dirname);
-            return 403;
+            RESPONSE_RETURN(resp, 403, NULL);
         }
     }
+
+    /*
+     * The post-create event cannot be run concurrently for more problem
+     * directories. The problem is in searching for duplicates process
+     * in case when two concurrently processed directories are duplicates
+     * of each other. Both of the directories are marked as duplicates
+     * of each other and are deleted.
+     */
+    log_debug("Creating glib main loop");
+    struct waiting_context context = {0};
+    context.main_loop = g_main_loop_new(NULL, FALSE);
+    context.dirname = strrchr(dirname, '/') + 1;
+
+    log_debug("Setting up a signal handler");
+    /* Set up signal pipe */
+    g_unix_open_pipe(g_signal_pipe, 0, NULL);
+    libreport_close_on_exec_on(g_signal_pipe[0]);
+    libreport_close_on_exec_on(g_signal_pipe[1]);
+    libreport_ndelay_on(g_signal_pipe[0]);
+    libreport_ndelay_on(g_signal_pipe[1]);
+    signal(SIGUSR1, handle_signal);
+    signal(SIGINT, handle_signal);
+    GIOChannel *channel_signal = abrt_gio_channel_unix_new(g_signal_pipe[0]);
+    g_io_add_watch(channel_signal, G_IO_IN | G_IO_PRI, handle_signal_pipe_cb, &context);
+
+    g_idle_add(emit_new_problem_signal, &context);
+
+    g_main_loop_run(context.main_loop);
+
+    g_main_loop_unref(context.main_loop);
+    g_io_channel_unref(channel_signal);
+    close(g_signal_pipe[1]);
+
+    log_notice("Waiting finished");
+
+    if (context.retcode != 0)
+        RESPONSE_RETURN(resp, context.retcode, NULL);
+
+    if (context.reply != ABRT_CONTINUE)
+        /* The only reason for the interruption is removed problem directory */
+        RESPONSE_RETURN(resp, 413, NULL);
+    /*
+     * The post-create event synchronization done.
+     */
 
     int child_stdout_fd;
     int child_pid = spawn_event_handler_child(dirname, "post-create", &child_stdout_fd);
 
     char *dup_of_dir = NULL;
-    struct strbuf *cmd_output = strbuf_new();
+    g_autoptr(GString) cmd_output = g_string_new(NULL);
 
     bool child_is_post_create = 1; /* else it is a notify child */
 
  read_child_output:
-    //log("Reading from event fd %d", child_stdout_fd);
+    //log_warning("Reading from event fd %d", child_stdout_fd);
 
     /* Read streamed data and split lines */
     for (;;)
     {
         char buf[250]; /* usually we get one line, no need to have big buf */
         errno = 0;
-        int r = safe_read(child_stdout_fd, buf, sizeof(buf) - 1);
+        int r = libreport_safe_read(child_stdout_fd, buf, sizeof(buf) - 1);
         if (r <= 0)
             break;
         buf[r] = '\0';
@@ -208,32 +406,32 @@ static int run_post_create(const char *dirname)
         while ((newline = strchr(raw, '\n')) != NULL)
         {
             *newline = '\0';
-            strbuf_append_str(cmd_output, raw);
-            char *msg = cmd_output->buf;
+            g_string_append(cmd_output, raw);
+            char *msg = cmd_output->str;
 
             if (child_is_post_create
-             && prefixcmp(msg, "DUP_OF_DIR: ") == 0
-            ) {
+             && g_str_has_prefix(msg, "DUP_OF_DIR: "))
+            {
                 free(dup_of_dir);
-                dup_of_dir = xstrdup(msg + strlen("DUP_OF_DIR: "));
+                dup_of_dir = g_strdup(msg + strlen("DUP_OF_DIR: "));
             }
             else
-                log("%s", msg);
+                log_warning("%s", msg);
 
-            strbuf_clear(cmd_output);
+            g_string_erase(cmd_output, 0, -1);
             /* jump to next line */
             raw = newline + 1;
         }
 
         /* beginning of next line. the line continues by next read */
-        strbuf_append_str(cmd_output, raw);
+        g_string_append(cmd_output, raw);
     }
 
     /* EOF/error */
 
     /* Wait for child to actually exit, collect status */
     int status = 0;
-    if (safe_waitpid(child_pid, &status, 0) <= 0)
+    if (libreport_safe_waitpid(child_pid, &status, 0) <= 0)
     /* should not happen */
         perror_msg("waitpid(%d)", child_pid);
 
@@ -247,14 +445,14 @@ static int run_post_create(const char *dirname)
     {
         if (WIFSIGNALED(status))
         {
-            log("'post-create' on '%s' killed by signal %d",
+            log_warning("'post-create' on '%s' killed by signal %d",
                             dirname, WTERMSIG(status));
             goto delete_bad_dir;
         }
         /* else: it is WIFEXITED(status) */
         if (!dup_of_dir)
         {
-            log("'post-create' on '%s' exited with %d",
+            log_warning("'post-create' on '%s' exited with %d",
                             dirname, WEXITSTATUS(status));
             goto delete_bad_dir;
         }
@@ -291,7 +489,7 @@ static int run_post_create(const char *dirname)
         {
             /* Update the last occurrence file by the time file of the new problem */
             struct dump_dir *new_dd = dd_opendir(dirname, DD_OPEN_READONLY);
-            char *last_ocr = NULL;
+            g_autofree char *last_ocr = NULL;
             if (new_dd)
             {
                 /* TIME must exists in a valid dump directory but we don't want to die
@@ -307,14 +505,12 @@ static int run_post_create(const char *dirname)
 
             if (!last_ocr)
             {   /* the new dump directory may lie in the dump location for some time */
-                log("Using current time for the last occurrence file which may be incorrect.");
+                log_warning("Using current time for the last occurrence file which may be incorrect.");
                 time_t t = time(NULL);
-                last_ocr = xasprintf("%lu", (long)t);
+                last_ocr = g_strdup_printf("%lu", (long)t);
             }
 
             dd_save_text(dd, FILENAME_LAST_OCCURRENCE, last_ocr);
-
-            free(last_ocr);
         }
     }
 
@@ -340,20 +536,27 @@ static int run_post_create(const char *dirname)
                 (dup_of_dir ? "notify-dup" : "notify"),
                 &fd
     );
-    //log("Started notify, fd %d -> %d", fd, child_stdout_fd);
-    xmove_fd(fd, child_stdout_fd);
+    //log_warning("Started notify, fd %d -> %d", fd, child_stdout_fd);
+    libreport_xmove_fd(fd, child_stdout_fd);
     child_is_post_create = 0;
-    strbuf_clear(cmd_output);
-    free(dup_of_dir);
+    if (dup_of_dir)
+        RESPONSE_SETTER(resp, 303, dup_of_dir);
+    else
+    {
+        RESPONSE_SETTER(resp, 200, NULL);
+        free(dup_of_dir);
+    }
     dup_of_dir = NULL;
+    g_string_erase(cmd_output, 0, -1);
     goto read_child_output;
 
  delete_bad_dir:
     log_warning("Deleting problem directory '%s'", dirname);
     delete_dump_dir(dirname);
+    /* TODO - better code to allow detection on client's side */
+    RESPONSE_SETTER(resp, 403, NULL);
 
  ret:
-    strbuf_free(cmd_output);
     free(dup_of_dir);
     close(child_stdout_fd);
     return 0;
@@ -366,9 +569,9 @@ static int run_post_create(const char *dirname)
 static int create_problem_dir(GHashTable *problem_info, unsigned pid)
 {
     /* Exit if free space is less than 1/4 of MaxCrashReportsSize */
-    if (g_settings_nMaxCrashReportsSize > 0)
+    if (abrt_g_settings_nMaxCrashReportsSize > 0)
     {
-        if (low_free_space(g_settings_nMaxCrashReportsSize, g_settings_dump_location))
+        if (abrt_low_free_space(abrt_g_settings_nMaxCrashReportsSize, abrt_g_settings_dump_location))
             exit(1);
     }
 
@@ -381,11 +584,11 @@ static int create_problem_dir(GHashTable *problem_info, unsigned pid)
     if (!dir_basename)
         dir_basename = g_hash_table_lookup(problem_info, FILENAME_TYPE);
 
-    char *path = xasprintf("%s/%s-%s-%u.new",
-                           g_settings_dump_location,
-                           dir_basename,
-                           iso_date_string(NULL),
-                           pid);
+    char *path = g_strdup_printf("%s/%s-%s-%u.new",
+                                 abrt_g_settings_dump_location,
+                                 dir_basename,
+                                 libreport_iso_date_string(NULL),
+                                 pid);
 
     /* This item is useless, don't save it */
     g_hash_table_remove(problem_info, "basename");
@@ -399,19 +602,101 @@ static int create_problem_dir(GHashTable *problem_info, unsigned pid)
         error_msg_and_die("Error creating problem directory '%s'", path);
     }
 
-    dd_create_basic_files(dd, client_uid, NULL);
-    dd_save_text(dd, FILENAME_ABRT_VERSION, VERSION);
+    const int proc_dir_fd = libreport_open_proc_pid_dir(pid);
+    g_autofree char *rootdir = NULL;
 
-    gpointer gpkey = g_hash_table_lookup(problem_info, FILENAME_CMDLINE);
-    if (!gpkey)
+    if (proc_dir_fd < 0)
+    {
+        pwarn_msg("Cannot open /proc/%d:", pid);
+    }
+    else if (libreport_process_has_own_root_at(proc_dir_fd))
+    {
+        /* Obtain the root directory path only if process' root directory is
+         * not the same as the init's root directory
+         */
+        rootdir = libreport_get_rootdir_at(proc_dir_fd);
+    }
+
+    /* Reading data from an arbitrary root directory is not secure. */
+    if (proc_dir_fd >= 0 && abrt_g_settings_explorechroots)
+    {
+        char proc_pid_root[sizeof("/proc/[pid]/root") + sizeof(pid_t) * 3];
+        const size_t w = snprintf(proc_pid_root, sizeof(proc_pid_root), "/proc/%d/root", pid);
+        assert(sizeof(proc_pid_root) > w);
+
+        /* Yes, test 'rootdir' but use 'source_filename' because 'rootdir' can
+         * be '/' for a process with own namespace. 'source_filename' is /proc/[pid]/root. */
+        dd_create_basic_files(dd, client_uid, (rootdir != NULL) ? proc_pid_root : NULL);
+    }
+    else
+    {
+        dd_create_basic_files(dd, client_uid, NULL);
+    }
+
+    if (proc_dir_fd >= 0)
     {
         /* Obtain and save the command line. */
-        char *cmdline = get_cmdline(pid);
+        g_autofree char *cmdline = libreport_get_cmdline_at(proc_dir_fd);
         if (cmdline)
         {
             dd_save_text(dd, FILENAME_CMDLINE, cmdline);
-            free(cmdline);
         }
+
+        /* Obtain and save the environment variables. */
+        g_autofree char *environ = libreport_get_environ_at(proc_dir_fd);
+        if (environ)
+        {
+            dd_save_text(dd, FILENAME_ENVIRON, environ);
+        }
+
+        dd_copy_file_at(dd, FILENAME_CGROUP,    proc_dir_fd, "cgroup");
+        dd_copy_file_at(dd, FILENAME_MOUNTINFO, proc_dir_fd, "mountinfo");
+
+        FILE *open_fds = dd_open_item_file(dd, FILENAME_OPEN_FDS, O_RDWR);
+        if (open_fds)
+        {
+            if (libreport_dump_fd_info_at(proc_dir_fd, open_fds) < 0)
+                dd_delete_item(dd, FILENAME_OPEN_FDS);
+            fclose(open_fds);
+        }
+
+        const int init_proc_dir_fd = libreport_open_proc_pid_dir(1);
+        FILE *namespaces = dd_open_item_file(dd, FILENAME_NAMESPACES, O_RDWR);
+        if (namespaces && init_proc_dir_fd >= 0)
+        {
+            if (libreport_dump_namespace_diff_at(init_proc_dir_fd, proc_dir_fd, namespaces) < 0)
+                dd_delete_item(dd, FILENAME_NAMESPACES);
+        }
+        if (init_proc_dir_fd >= 0)
+            close(init_proc_dir_fd);
+        if (namespaces)
+            fclose(namespaces);
+
+        /* The process's root directory isn't the same as the init's root
+         * directory. */
+        if (rootdir)
+        {
+            if (strcmp(rootdir, "/") ==  0)
+            {   /* We are dealing containerized process because root's
+                 * directory path is '/' and that means that the process
+                 * has mounted its own root.
+                 * Seriously, it is possible if the process is running in its
+                 * own MOUNT namespaces.
+                 */
+                log_debug("Process %d is considered to be containerized", pid);
+                pid_t container_pid;
+                if (libreport_get_pid_of_container_at(proc_dir_fd, &container_pid) == 0)
+                {
+                    g_autofree char *container_cmdline = libreport_get_cmdline(container_pid);
+                    dd_save_text(dd, FILENAME_CONTAINER_CMDLINE, container_cmdline);
+                }
+            }
+            else
+            {   /* We are dealing chrooted process. */
+                dd_save_text(dd, FILENAME_ROOTDIR, rootdir);
+            }
+        }
+        close(proc_dir_fd);
     }
 
     /* Store id of the user whose application crashed. */
@@ -420,12 +705,15 @@ static int create_problem_dir(GHashTable *problem_info, unsigned pid)
     dd_save_text(dd, FILENAME_UID, uid_str);
 
     GHashTableIter iter;
+    gpointer gpkey;
     gpointer gpvalue;
     g_hash_table_iter_init(&iter, problem_info);
     while (g_hash_table_iter_next(&iter, &gpkey, &gpvalue))
     {
         dd_save_text(dd, (gchar *) gpkey, (gchar *) gpvalue);
     }
+
+    dd_save_text(dd, FILENAME_ABRT_VERSION, VERSION);
 
     dd_close(dd);
 
@@ -435,10 +723,9 @@ static int create_problem_dir(GHashTable *problem_info, unsigned pid)
     /* Move the completely created problem directory
      * to final directory.
      */
-    char *newpath = xstrndup(path, strlen(path) - strlen(".new"));
+    g_autofree char *newpath = g_strndup(path, strlen(path) - strlen(".new"));
     if (rename(path, newpath) == 0)
         strcpy(path, newpath);
-    free(newpath);
 
     log_notice("Saved problem directory of pid %u to '%s'", pid, path);
 
@@ -447,16 +734,21 @@ static int create_problem_dir(GHashTable *problem_info, unsigned pid)
      */
     printf("HTTP/1.1 201 Created\r\n\r\n");
     fflush(NULL);
+
+    /* Closing STDIN_FILENO (abrtd duped the socket to stdin and stdout) and
+     * not-replacing it with something else to let abrt-server die on reading
+     * from invalid stdin - to catch bugs. */
+    close(STDIN_FILENO);
     close(STDOUT_FILENO);
-    xdup2(STDERR_FILENO, STDOUT_FILENO); /* paranoia: don't leave stdout fd closed */
+    libreport_xdup2(STDERR_FILENO, STDOUT_FILENO); /* paranoia: don't leave stdout fd closed */
 
     /* Trim old problem directories if necessary */
-    if (g_settings_nMaxCrashReportsSize > 0)
+    if (abrt_g_settings_nMaxCrashReportsSize > 0)
     {
-        trim_problem_dirs(g_settings_dump_location, g_settings_nMaxCrashReportsSize * (double)(1024*1024), path);
+        abrt_trim_problem_dirs(abrt_g_settings_dump_location, abrt_g_settings_nMaxCrashReportsSize * (double)(1024*1024), path);
     }
 
-    run_post_create(path);
+    run_post_create(path, NULL);
 
     /* free(path); */
     exit(0);
@@ -480,7 +772,7 @@ static gboolean key_value_ok(gchar *key, gchar *value)
      || strcmp(key, FILENAME_TYPE) == 0
     )
     {
-        if (!str_is_correct_filename(value))
+        if (!libreport_str_is_correct_filename(value))
         {
             error_msg("Value of '%s' ('%s') is not a valid directory name",
                       key, value);
@@ -488,13 +780,14 @@ static gboolean key_value_ok(gchar *key, gchar *value)
         }
     }
 
-    return allowed_new_user_problem_entry(client_uid, key, value);
+    return abrt_new_user_problem_entry_allowed(client_uid, key, value);
 }
 
 /* Handles a message received from client over socket. */
 static void process_message(GHashTable *problem_info, char *message)
 {
-    gchar *key, *value;
+    g_autofree gchar *key = NULL;
+    gchar *value;
 
     value = strchr(message, '=');
     if (value)
@@ -512,10 +805,7 @@ static void process_message(GHashTable *problem_info, char *message)
             }
             else
             {
-                g_hash_table_insert(problem_info, key, xstrdup(value));
-                /* Compat, delete when FILENAME_ANALYZER is replaced by FILENAME_TYPE: */
-                if (strcmp(key, FILENAME_TYPE) == 0)
-                    g_hash_table_insert(problem_info, xstrdup(FILENAME_ANALYZER), xstrdup(value));
+                g_hash_table_insert(problem_info, key, g_strdup(value));
                 /* Prevent freeing key later: */
                 key = NULL;
             }
@@ -525,7 +815,6 @@ static void process_message(GHashTable *problem_info, char *message)
             /* should use error_msg_and_die() here? */
             error_msg("Invalid key or value format: %s", message);
         }
-        free(key);
     }
     else
     {
@@ -581,12 +870,12 @@ unsigned convert_pid(GHashTable *problem_info)
     return (unsigned) ret;
 }
 
-static int perform_http_xact(void)
+static int perform_http_xact(struct response *rsp)
 {
     /* use free instead of g_free so that we can use xstr* functions from
      * libreport/lib/xfuncs.c
      */
-    GHashTable *problem_info = g_hash_table_new_full(g_str_hash, g_str_equal,
+    g_autoptr(GHashTable) problem_info = g_hash_table_new_full(g_str_hash, g_str_equal,
                                      free, free);
     /* Read header */
     char *body_start = NULL;
@@ -595,7 +884,7 @@ static int perform_http_xact(void)
     /* Loop until EOF/error/timeout/end_of_header */
     while (1)
     {
-        messagebuf_data = xrealloc(messagebuf_data, messagebuf_len + INPUT_BUFFER_SIZE);
+        messagebuf_data = g_realloc(messagebuf_data, messagebuf_len + INPUT_BUFFER_SIZE);
         char *p = messagebuf_data + messagebuf_len;
         int rd = read(STDIN_FILENO, p, INPUT_BUFFER_SIZE);
         if (rd < 0)
@@ -647,11 +936,11 @@ static int perform_http_xact(void)
     /* First line must be "op<space>[http://host]/path<space>HTTP/n.n".
      * <space> is exactly one space char.
      */
-    if (prefixcmp(messagebuf_data, "DELETE ") == 0)
+    if (g_str_has_prefix(messagebuf_data, "DELETE "))
     {
         messagebuf_data += strlen("DELETE ");
         char *space = strchr(messagebuf_data, ' ');
-        if (!space || prefixcmp(space+1, "HTTP/") != 0)
+        if (!space || !g_str_has_prefix(space+1, "HTTP/"))
             return 400; /* Bad Request */
         *space = '\0';
         //decode_url(messagebuf_data); %20 => ' '
@@ -664,8 +953,8 @@ static int perform_http_xact(void)
      * "PUT /" implies creation or replace of resource named "/"!
      * Delete PUT in 2014.
      */
-    if (prefixcmp(messagebuf_data, "PUT ") != 0
-     && prefixcmp(messagebuf_data, "POST ") != 0
+    if (!g_str_has_prefix(messagebuf_data, "PUT ")
+     && !g_str_has_prefix(messagebuf_data, "POST ")
     ) {
         return 400; /* Bad Request */
     }
@@ -675,10 +964,10 @@ static int perform_http_xact(void)
         CREATION_REQUEST,
     };
     int url_type;
-    char *url = skip_non_whitespace(messagebuf_data) + 1; /* skip "POST " */
-    if (prefixcmp(url, "/creation_notification ") == 0)
+    char *url = libreport_skip_non_whitespace(messagebuf_data) + 1; /* skip "POST " */
+    if (g_str_has_prefix(url, "/creation_notification "))
         url_type = CREATION_NOTIFICATION;
-    else if (prefixcmp(url, "/ ") == 0)
+    else if (g_str_has_prefix(url, "/ "))
         url_type = CREATION_REQUEST;
     else
         return 400; /* Bad Request */
@@ -711,7 +1000,7 @@ static int perform_http_xact(void)
             }
         }
 
-        messagebuf_data = xrealloc(messagebuf_data, messagebuf_len + INPUT_BUFFER_SIZE + 1);
+        messagebuf_data = g_realloc(messagebuf_data, messagebuf_len + INPUT_BUFFER_SIZE + 1);
         int rd = read(STDIN_FILENO, messagebuf_data + messagebuf_len, INPUT_BUFFER_SIZE);
         if (rd < 0)
         {
@@ -739,39 +1028,42 @@ static int perform_http_xact(void)
         {
             error_msg("UID=%ld is not authorized to trigger post-create processing", (long)client_uid);
             ret = 403; /* Forbidden */
-            goto out;
+            return ret;
         }
 
         messagebuf_data[messagebuf_len] = '\0';
-        return run_post_create(messagebuf_data);
+        return run_post_create(messagebuf_data, rsp);
     }
 
-    /* Save problem dir */
-    unsigned pid = convert_pid(problem_info);
     die_if_data_is_missing(problem_info);
 
+    /* Save problem dir */
     char *executable = g_hash_table_lookup(problem_info, FILENAME_EXECUTABLE);
     if (executable)
     {
-        char *last_file = concat_path_file(g_settings_dump_location, "last-via-server");
+        g_autofree char *last_file = g_build_filename(abrt_g_settings_dump_location ? abrt_g_settings_dump_location : "", "last-via-server", NULL);
         int repeating_crash = check_recent_crash_file(last_file, executable);
-        free(last_file);
         if (repeating_crash) /* Only pretend that we saved it */
-            goto out; /* ret is 0: "success" */
+        {
+            error_msg("Not saving repeating crash in '%s'", executable);
+            return ret; /* ret is 0: "success" */
+        }
     }
 
-#if 0
-//TODO:
-    /* At least it should generate local problem identifier UUID */
-    problem_data_add_basics(problem_info);
-//...the problem being that problem_info here is not a problem_data_t!
-#endif
+    unsigned pid = convert_pid(problem_info);
+    struct ns_ids client_ids;
+    if (libreport_get_ns_ids(client_pid, &client_ids) < 0)
+        error_msg_and_die("Cannot get peer's Namespaces from /proc/%d/ns", client_pid);
+
+    if (client_ids.nsi_ids[PROC_NS_ID_PID] != g_ns_ids.nsi_ids[PROC_NS_ID_PID])
+    {
+        log_notice("Client is running in own PID Namespace, using PID %d instead of %d", client_pid, pid);
+        pid = client_pid;
+    }
 
     create_problem_dir(problem_info, pid);
     /* does not return */
 
- out:
-    g_hash_table_destroy(problem_info);
     return ret; /* Used as HTTP response code */
 }
 
@@ -800,20 +1092,20 @@ int main(int argc, char **argv)
     };
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_INTEGER('u', NULL, &client_uid, _("Use NUM as client uid")),
         OPT_BOOL(   's', NULL, NULL       , _("Log to syslog")),
         OPT_BOOL(   'p', NULL, NULL       , _("Add program names to log")),
         OPT_END()
     };
-    unsigned opts = parse_opts(argc, argv, program_options, program_usage_string);
+    unsigned opts = libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(opts & OPT_p);
+    libreport_export_abrt_envvars(opts & OPT_p);
 
-    msg_prefix = xasprintf("%s[%u]", g_progname, getpid());
+    libreport_msg_prefix = g_strdup_printf("%s[%u]", libreport_g_progname, getpid());
     if (opts & OPT_s)
     {
-        logmode = LOGMODE_JOURNAL;
+        libreport_logmode = LOGMODE_JOURNAL;
     }
 
     /* Set up timeout handling */
@@ -828,27 +1120,42 @@ int main(int argc, char **argv)
     /* Part 2 - set the timeout per se */
     alarm(TIMEOUT);
 
+    /* Get uid of the connected client */
+    struct ucred cr;
+    socklen_t crlen = sizeof(cr);
+    if (0 != getsockopt(STDIN_FILENO, SOL_SOCKET, SO_PEERCRED, &cr, &crlen))
+        perror_msg_and_die("getsockopt(SO_PEERCRED)");
+    if (crlen != sizeof(cr))
+        error_msg_and_die("%s: bad crlen %d", "getsockopt(SO_PEERCRED)", (int)crlen);
+
     if (client_uid == (uid_t)-1L)
-    {
-        /* Get uid of the connected client */
-        struct ucred cr;
-        socklen_t crlen = sizeof(cr);
-        if (0 != getsockopt(STDIN_FILENO, SOL_SOCKET, SO_PEERCRED, &cr, &crlen))
-            perror_msg_and_die("getsockopt(SO_PEERCRED)");
-        if (crlen != sizeof(cr))
-            error_msg_and_die("%s: bad crlen %d", "getsockopt(SO_PEERCRED)", (int)crlen);
         client_uid = cr.uid;
-    }
 
-    load_abrt_conf();
+    client_pid = cr.pid;
 
-    int r = perform_http_xact();
+    pid_t pid = getpid();
+    if (libreport_get_ns_ids(getpid(), &g_ns_ids) < 0)
+        error_msg_and_die("Cannot get own Namespaces from /proc/%d/ns", pid);
+
+    abrt_load_abrt_conf();
+
+    struct response rsp = { 0 };
+    int r = perform_http_xact(&rsp);
     if (r == 0)
         r = 200;
 
-    free_abrt_conf_data();
+    if (rsp.code == 0)
+        rsp.code = r;
 
-    printf("HTTP/1.1 %u \r\n\r\n", r);
+    abrt_free_abrt_conf_data();
+
+    printf("HTTP/1.1 %u \r\n\r\n", rsp.code);
+    if (rsp.message != NULL)
+    {
+        printf("%s", rsp.message);
+        fflush(stdout);
+        free(rsp.message);
+    }
 
     return (r >= 400); /* Error if 400+ */
 }

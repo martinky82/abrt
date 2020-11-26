@@ -21,7 +21,9 @@
  */
 #define IGNORE_RESULT(func_call) do { if (func_call) /* nothing */; } while (0)
 
-#define DEFAULT_XORG_CRASH_REASON "Xorg server crashed"
+#define DEFAULT_XORG_CRASH_REASON "Display server crashed"
+
+int g_abrt_xorg_sleep_woke_up_on_signal;
 
 int abrt_xorg_signaled_sleep(int seconds)
 {
@@ -71,15 +73,15 @@ char *skip_pfx(char *str)
 
 static char *list2lines(GList *list)
 {
-    struct strbuf *s = strbuf_new();
+    GString *s = g_string_new(NULL);
     while (list)
     {
-        strbuf_append_str(s, (char*)list->data);
-        strbuf_append_char(s, '\n');
+        g_string_append(s, (char*)list->data);
+        g_string_append_c(s, '\n');
         free(list->data);
         list = g_list_delete_link(list, list);
     }
-    return strbuf_free_nobuf(s);
+    return g_string_free(s, FALSE);
 }
 
 void xorg_crash_info_print_crash(struct xorg_crash_info *crash_info)
@@ -104,9 +106,9 @@ int xorg_crash_info_save_in_dump_dir(struct xorg_crash_info *crash_info, struct 
     if (!crash_info->exe)
     {
         if (access("/usr/bin/Xorg", X_OK) == 0)
-            crash_info->exe = xstrdup("/usr/bin/Xorg");
+            crash_info->exe = g_strdup("/usr/bin/Xorg");
         else
-            crash_info->exe = xstrdup("/usr/bin/X");
+            crash_info->exe = g_strdup("/usr/bin/X");
     }
     dd_save_text(dd, FILENAME_EXECUTABLE, crash_info->exe);
 
@@ -130,16 +132,15 @@ void xorg_crash_info_create_dump_dir(struct xorg_crash_info *crash_info, const c
     if (world_readable)
         dd_set_no_owner(dd);
 
-    char *path = xstrdup(dd->dd_dirname);
+    g_autofree char *path = g_strdup(dd->dd_dirname);
     dd_close(dd);
-    notify_new_path(path);
-    free(path);
+    abrt_notify_new_path(path);
 }
 
 char *xorg_get_next_line_from_fd(void *fd)
 {
     FILE *f = (FILE *)fd;
-    return xmalloc_fgetline(f);
+    return libreport_xmalloc_fgetline(f);
 }
 
 
@@ -171,7 +172,7 @@ struct xorg_crash_info *process_xorg_bt(char *(*get_next_line)(void *), void *da
     char *exe = NULL;
     GList *list = NULL;
     unsigned cnt = 0;
-    char *line = NULL;
+    g_autofree char *line = NULL;
     while ((line = get_next_line(data)) != NULL)
     {
         char *p = skip_pfx(line);
@@ -184,28 +185,31 @@ struct xorg_crash_info *process_xorg_bt(char *(*get_next_line)(void *), void *da
         if (*p == '\0')
             continue;
 
-        /* xorg-server-1.12.0/os/osinit.c:
-         * if (sip->si_code == SI_USER) {
-         *     ErrorF("Recieved signal %d sent by process %ld, uid %ld\n",
-         *             ^^^^^^^^ yes, typo here! Can't grep for this word! :(
-         *            signo, (long) sip->si_pid, (long) sip->si_uid);
-         * } else {
-         *     switch (signo) {
-         *         case SIGSEGV:
-         *         case SIGBUS:
-         *         case SIGILL:
-         *         case SIGFPE:
-         *             ErrorF("%s at address %p\n", strsignal(signo), sip->si_addr);
+        /* Slight optimization, since we know that the error will necessarily
+         * start with an alphabetic character:
+         * https://gitlab.freedesktop.org/xorg/xserver/-/blob/3d6efc4aaff80301c0b10b7b6ba297eb5e54c1a0/os/osinit.c#L137
          */
-        if (*p < '0' || *p > '9')
+        if (isalpha(*p))
         {
-            if (strstr(p, " at address ") || strstr(p, " sent by process "))
+            /* Extend as needed. */
+            const char *substrings[] =
             {
-                overlapping_strcpy(line, p);
-                reason = line;
-                line = NULL;
+                /* "Received signal %u sent by process %u, uid %u" */
+                " sent by process ",
+                /* %s at address %p */
+                " at address ",
+            };
+
+            for (size_t i = 0; i < G_N_ELEMENTS (substrings); i++)
+            {
+                if (strstr(p, substrings[i]) != NULL)
+                {
+                    libreport_overlapping_strcpy(line, p);
+                    reason = line;
+                    line = NULL;
+                }
             }
-            /* Here you can place other cases of useful reason string */
+
             break;
         }
 
@@ -220,32 +224,31 @@ struct xorg_crash_info *process_xorg_bt(char *(*get_next_line)(void *), void *da
         /* Guess Xorg server's executable name from it */
         if (!exe)
         {
-            char *filename = skip_whitespace(end + 1);
-            char *filename_end = skip_non_whitespace(filename);
+            char *filename = libreport_skip_whitespace(end + 1);
+            char *filename_end = libreport_skip_non_whitespace(filename);
             char sv = *filename_end;
             *filename_end = '\0';
-            /* Does it look like "[/usr]/[s]bin/Xfoo"? */
-            if (strstr(filename, "bin/X"))
-                exe = xstrdup(filename);
+            /* Does it look like "[/usr]/[s]bin/Xfoo" or [/usr]/libexec/Xfoo"? */
+            if (strstr(filename, "bin/X") || strstr(filename, "libexec/X"))
+                exe = g_strdup(filename);
             *filename_end = sv;
         }
 
         /* Save it to list */
-        overlapping_strcpy(line, p);
+        libreport_overlapping_strcpy(line, p);
         list = g_list_prepend(list, line);
         line = NULL;
         if (++cnt > 255) /* prevent ridiculously large bts */
             break;
     }
-    free(line);
 
     if (list)
     {
-        struct xorg_crash_info *crash_info = xmalloc(sizeof(struct xorg_crash_info));
+        struct xorg_crash_info *crash_info = g_new(struct xorg_crash_info, 1);
 
         list = g_list_reverse(list);
         crash_info->backtrace = list2lines(list); /* frees list */
-        crash_info->reason = (reason ? reason : xstrdup(DEFAULT_XORG_CRASH_REASON));
+        crash_info->reason = (reason ? reason : g_strdup(DEFAULT_XORG_CRASH_REASON));
         crash_info->exe = exe;
 
         return crash_info;

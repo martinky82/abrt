@@ -18,7 +18,7 @@
 #include "system-config-abrt.h"
 
 #include <stdlib.h>
-#include <libabrt.h>
+#include "libabrt.h"
 
 #define APP_NAME "System Config ABRT"
 
@@ -159,7 +159,7 @@ system_config_abrt_new (void)
 
 int main(int argc, char *argv[])
 {
-    glib_init();
+    libreport_glib_init();
 
     SystemConfigAbrt *system_config_abrt = system_config_abrt_new();
 

@@ -7,8 +7,7 @@ bin_SCRIPTS = \
     abrt-handle-upload
 
 bin_PROGRAMS = \
-    abrt-action-save-package-data \
-    abrt-action-save-container-data
+    abrt-action-save-package-data
 
 sbin_PROGRAMS = \
     abrtd \
@@ -16,7 +15,10 @@ sbin_PROGRAMS = \
     abrt-upload-watch \
     abrt-auto-reporting
 
-libexec_PROGRAMS = abrt-handle-event
+libexec_PROGRAMS = \
+    abrt-handle-event \
+    abrt-action-save-container-data
+
 
 # This is a daemon, building with full relro and PIE
 # for increased security.
@@ -95,6 +97,7 @@ abrt_action_save_package_data_CPPFLAGS = \
     -I$(srcdir)/../lib \
     -DCONF_DIR=\"$(CONF_DIR)\" \
     $(GLIB_CFLAGS) \
+    $(RPM_CFLAGS) \
     $(LIBREPORT_CFLAGS) \
     -D_GNU_SOURCE
 abrt_action_save_package_data_LDADD = \
@@ -123,10 +126,6 @@ abrt_auto_reporting_CPPFLAGS = \
     $(LIBREPORT_CFLAGS) \
     -D_GNU_SOURCE
 
-if AUTHENTICATED_AUTOREPORTING
-abrt_auto_reporting_CPPFLAGS += -DAUTHENTICATED_AUTOREPORTING=1
-endif
-
 abrt_auto_reporting_LDADD = \
     ../lib/libabrt.la \
     $(LIBREPORT_LIBS)
@@ -136,8 +135,6 @@ dist_daemonconf_DATA = \
     abrt.conf \
     abrt-action-save-package-data.conf \
     gpg_keys.conf
-defaultdaemonconfdir = $(DEFAULT_CONF_DIR)
-dist_defaultdaemonconf_DATA = $(dist_daemonconf_DATA)
 
 dbusabrtconfdir = ${sysconfdir}/dbus-1/system.d/
 dist_dbusabrtconf_DATA = org.freedesktop.problems.daemon.conf

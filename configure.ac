@@ -56,12 +56,6 @@ IT_PROG_INTLTOOL([0.35.0])
 
 dnl ****** END ****************************************
 
-AM_PATH_PYTHON
-if test -z "$PYTHON"; then
-    echo "*** Essential program python not found" 1>&2
-    exit 1
-fi
-
 AC_PATH_PROG([ASCIIDOC], [asciidoc], [no])
 [if test "$ASCIIDOC" = "no"]
 [then]
@@ -80,59 +74,40 @@ AC_PATH_PROG([XMLTO], [xmlto], [no])
     [exit 1]
 [fi]
 
-AC_PATH_PROG([PYTHON_CONFIG], [python-config], [no])
-[if test "$PYTHON_CONFIG" = "no"]
-[then]
-    [echo "The python-config program was not found in the search path. Please ensure"]
-    [echo "that it is installed and its directory is included in the search path."]
-    [echo "Then run configure again before attempting to build ABRT."]
-    [exit 1]
-[fi]
-
 AC_ARG_WITH(python3,
 AS_HELP_STRING([--with-python3],[build Python3 support (default is YES)]),
 ABRT_PARSE_WITH([python3]))
 
 [if test -z "$NO_PYTHON3"]
 [then]
-    AM_CONDITIONAL(BUILD_PYTHON3, true)
-    AC_PATH_PROG([PYTHON3], [python3], [no])
-    [if test "$PYTHON3" == "no"]
-    [then]
-        [echo "The python3 program was not found in the search path. Please ensure"]
-        [echo "that it is installed and its directory is included in the search path or"]
-        [echo "pass --without-python3 to ./configure."]
-        [echo "Then run configure again before attempting to build ABRT."]
-        [exit 1]
-    [fi]
+    AM_CONDITIONAL([BUILD_PYTHON3], [true])
+    AM_PATH_PYTHON(
+        [3.6],,
+        [AC_MSG_ERROR([
+    The python3 program was not found in the search path. Please ensure
+    that it is installed and its directory is included in the search path or
+    pass --without-python3 to ./configure.
+    Then run configure again before attempting to build ABRT.
+        ])]
+    )
 
-    AC_PATH_PROG([PYTHON3_CONFIG], [python3-config], [no])
+    AC_PATH_PROG([PYTHON3_CONFIG], [python${PYTHON_VERSION}-config], [no])
     [if test "$PYTHON3_CONFIG" = "no"]
     [then]
-        [echo "The python3-config program was not found in the search path. Please ensure"]
+        [echo "The python${PYTHON_VERSION}-config program was not found in the search path. Please ensure"]
         [echo "that it is installed and its directory is included in the search path or"]
         [echo "pass --without-python3 to ./configure."]
         [echo "Then run configure again before attempting to build ABRT."]
         [exit 1]
     [fi]
 
-    PYTHON3_CFLAGS=`python3-config --cflags 2> /dev/null`
-    PYTHON3_LIBS=`python3-config --libs 2> /dev/null`
+    PYTHON3_CFLAGS=`${PYTHON3_CONFIG} --cflags 2> /dev/null`
+    PYTHON3_LIBS=`${PYTHON3_CONFIG} --libs 2> /dev/null`
 
-    AC_SUBST([PYTHON3_PREFIX], ['${prefix}'])
-    AC_SUBST([PYTHON3_EXEC_PREFIX], ['${exec_prefix}'])
-
-    PYTHON3_DIR=`$PYTHON3 -c "import distutils.sysconfig; \
-        print(distutils.sysconfig.get_python_lib(0,0,prefix='$PYTHON3_PREFIX'))"`
-    PYTHON3_EXECDIR=`$PYTHON3 -c "import distutils.sysconfig; \
-        print(distutils.sysconfig.get_python_lib(1,0,prefix='$PYTHON3_EXEC_PREFIX'))"`
-
-    AC_SUBST(PYTHON3_CFLAGS)
-    AC_SUBST(PYTHON3_LIBS)
-    AC_SUBST(python3dir, $PYTHON3_DIR)
-    AC_SUBST(py3execdir, $PYTHON3_EXECDIR)
+    AC_SUBST([PYTHON3_CFLAGS])
+    AC_SUBST([PYTHON3_LIBS])
 [else]
-    AM_CONDITIONAL(BUILD_PYTHON3, false)
+    AM_CONDITIONAL([BUILD_PYTHON3], [false])
 [fi]
 
 AC_ARG_WITH(pythondoc,
@@ -142,10 +117,10 @@ ABRT_PARSE_WITH([pythondoc]))
 [if test -z "$NO_PYTHONDOC"]
 [then]
     AM_CONDITIONAL(HAVE_PYTHON_SPHINX, true)
-    AC_PATH_PROG([PYTHON_SPHINX], [sphinx-build], [no])
+    AC_PATH_PROG([PYTHON_SPHINX], [sphinx-build-3], [no])
     [if test "$PYTHON_SPHINX" = "no"]
     [then]
-        [echo "The sphinx-build program was not found in the search path. Please ensure"]
+        [echo "The sphinx-build-3 program was not found in the search path. Please ensure"]
         [echo "that it is installed and its directory is included in the search path or"]
         [echo "pass --without-pythondoc to ./configure."]
         [echo "Then run configure again before attempting to build ABRT."]
@@ -161,50 +136,37 @@ ABRT_PARSE_WITH([pythontests]))
 
 [if test -z "$NO_PYTHONTESTS"]
 [then]
-    AM_CONDITIONAL(HAVE_PYTHON_NOSE, true)
-    AC_PATH_PROG([PYTHON_NOSE], [nosetests], [no])
-    [if test "$PYTHON_NOSE" = "no"]
+    AM_CONDITIONAL(HAVE_PYTEST, true)
+    AC_PATH_PROG([PYTEST], [pytest-3], [no])
+    [if test "$PYTEST" = "no"]
     [then]
-        [echo "The nosetests program was not found in the search path. Please ensure"]
+        [echo "The pytest-3 program was not found in the search path. Please ensure"]
         [echo "that it is installed and its directory is included in the search path or"]
         [echo "pass --without-pythontests to ./configure."]
         [echo "Then run configure again before attempting to build ABRT."]
         [exit 1]
     [fi]
 [else]
-    AM_CONDITIONAL(HAVE_PYTHON_NOSE, false)
+    AM_CONDITIONAL(HAVE_PYTEST, false)
 [fi]
 
-PYTHON_CFLAGS=`python-config --cflags 2> /dev/null`
-PYTHON_LIBS=`python-config --libs 2> /dev/null`
-
-AC_SUBST(PYTHON_CFLAGS)
-AC_SUBST(PYTHON_LIBS)
+GLIB_VERSION=2.55.1
+LIBREPORT_VERSION=2.13.0
 
 PKG_CHECK_MODULES([GTK], [gtk+-3.0])
-PKG_CHECK_MODULES([GLIB], [glib-2.0 >= 2.43])
+PKG_CHECK_MODULES([GLIB], [gio-2.0 >= $GLIB_VERSION glib-2.0 >= $GLIB_VERSION])
 PKG_CHECK_MODULES([DBUS], [dbus-1])
 PKG_CHECK_MODULES([LIBXML], [libxml-2.0])
-PKG_CHECK_MODULES([RPM], [rpm])
-PKG_CHECK_MODULES([LIBNOTIFY], [libnotify >= 0.7.0])
-PKG_CHECK_MODULES([NSS], [nss])
-PKG_CHECK_MODULES([LIBREPORT], [libreport])
-PKG_CHECK_MODULES([LIBREPORT_GTK], [libreport-gtk])
-PKG_CHECK_MODULES([POLKIT], [polkit-gobject-1])
-PKG_CHECK_MODULES([POLKIT_AGENT], [polkit-agent-1])
+PKG_CHECK_MODULES([LIBREPORT], [libreport >= $LIBREPORT_VERSION])
+PKG_CHECK_MODULES([LIBREPORT_GTK], [libreport-gtk >= $LIBREPORT_VERSION])
+PKG_CHECK_MODULES([LIBSOUP], [libsoup-2.4])
 PKG_CHECK_MODULES([GIO], [gio-2.0])
+PKG_CHECK_MODULES([GIO_UNIX], [gio-unix-2.0])
 PKG_CHECK_MODULES([SATYR], [satyr])
-PKG_CHECK_MODULES([SYSTEMD_JOURNAL], [libsystemd-journal])
+PKG_CHECK_MODULES([SYSTEMD], [libsystemd])
 PKG_CHECK_MODULES([GSETTINGS_DESKTOP_SCHEMAS], [gsettings-desktop-schemas >= 3.15.1])
-PKG_CHECK_MODULES([LIBSELINUX], [libselinux])
 
 PKG_PROG_PKG_CONFIG
-AC_ARG_WITH([systemdsystemunitdir],
-        AS_HELP_STRING([--with-systemdsystemunitdir=DIR], [Directory for systemd service files]),
-        [], [with_systemdsystemunitdir=$($PKG_CONFIG --variable=systemdsystemunitdir systemd)])
-AC_SUBST([systemdsystemunitdir], [$with_systemdsystemunitdir])
-AM_CONDITIONAL(HAVE_SYSTEMD, [test -n "$with_systemdsystemunitdir"])
-
 AC_ARG_WITH([dbusinterfacedir],
         AS_HELP_STRING([--with-dbusinterfacedir=DIR], [Directory for dbus interface files]),
         [], [with_dbusinterfacedir=${datadir}/dbus-1/interfaces])
@@ -222,18 +184,16 @@ AC_CHECK_HEADER([sys/inotify.h], [],
 AC_CHECK_HEADERS([locale.h])
 
 CONF_DIR='${sysconfdir}/${PACKAGE_NAME}'
-DEFAULT_CONF_DIR='${datadir}/${PACKAGE_NAME}/conf.d'
 VAR_RUN='${localstatedir}/run'
 VAR_STATE='${localstatedir}/lib/${PACKAGE_NAME}'
 PLUGINS_CONF_DIR='${sysconfdir}/${PACKAGE_NAME}/plugins'
-DEFAULT_PLUGINS_CONF_DIR='${datadir}/${PACKAGE_NAME}/conf.d/plugins'
 EVENTS_DIR='${datadir}/libreport/events'
 EVENTS_CONF_DIR='${sysconfdir}/libreport/events.d'
+JOURNAL_CATALOG_DIR='$(prefix)/lib/systemd/catalog'
 ENABLE_SOCKET_OR_DBUS='-DENABLE_DBUS=1'
 DEFAULT_DUMP_LOCATION_MODE=0751
 DEFAULT_DUMP_DIR_MODE=$($PKG_CONFIG --variable=dd_mode libreport)
 LIBREPORT_PLUGINS_CONF_DIR=$($PKG_CONFIG --variable=plugins_conf_dir libreport)
-PROBLEMS_CONFIG_INTERFACES_DIR=${dbusinterfacedir}
 
 AC_ARG_WITH([defaultdumplocation],
             AS_HELP_STRING([--with-defaultdumplocation=DIR],
@@ -241,16 +201,29 @@ AC_ARG_WITH([defaultdumplocation],
             [], [with_defaultdumplocation=${localstatedir}/spool/abrt])
 AC_SUBST([DEFAULT_DUMP_LOCATION], [$with_defaultdumplocation])
 
+AC_ARG_WITH([defaultpackagemanager],
+            AS_HELP_STRING([--with-defaultpackagemanager=dnf],
+                           [Default package manager. 'dnf' or 'yum' ('dnf')]),
+            [], [with_defaultpackagemanager=dnf])
+AC_SUBST([DEFAULT_PACKAGE_MANAGER], [$with_defaultpackagemanager])
+
+
 AC_ARG_WITH(augeaslenslibdir,
                     [AS_HELP_STRING([--with-augeaslenslibdir=DIR],
                                                    [Directory for librepor lens (default: /usr/share/augeas/lenses)])],
                                 [], [with_augeaslenslibdir="/usr/share/augeas/lenses"])
-AC_SUBST([AUGEAS_LENS_LIB_DIR], [$with_augeaslenslibdir])
+AC_ARG_WITH([support-url],
+        AS_HELP_STRING([--with-support-url=URL],
+                [Specify the support URL to show in catalog entries]),
+        [SUPPORT_URL="$withval"],
+        [SUPPORT_URL=https://bugzilla.redhat.com/])
+
+AC_SUBST(SUPPORT_URL)
 
 AC_PATH_PROG(AUGPARSE, augparse, no)
-[if test "$ARGPARSE" = "no"]
+[if test "$AUGPARSE" = "no"]
 [then]
-    [echo "The argparse program was not found in the search path. Please ensure"]
+    [echo "The augparse program was not found in the search path. Please ensure"]
     [echo "that it is installed and its directory is included in the search path."]
     [echo "Then run configure again before attempting to build ABRT."]
     [exit 1]
@@ -262,6 +235,9 @@ AC_ARG_ENABLE(doxygen-docs,
     [enable_doxygen_docs=$enableval],
     [enable_doxygen_docs=no]
 )
+
+AC_PATH_PROG([FINDMNT], [findmnt], [/usr/bin/findmnt], [$PATH:/usr/sbin:/sbin])
+AC_PATH_PROG([GDB], [gdb], [/usr/bin/gdb], [/usr/libexec$PATH_SEPARATOR$PATH])
 
 # Doxygen Documentation
 
@@ -285,29 +261,6 @@ else
 fi
 
 AM_CONDITIONAL(DBUS_DOXYGEN_DOCS_ENABLED, test "$enable_doxygen_docs" = "yes")
-
-
-# Autoreporting advertisement
-
-AC_ARG_ENABLE(suggest-autoreporting,
-    AS_HELP_STRING([--enable-suggest-autoreporting],
-    [print messages encouraging users to enable autoreporting]),
-    [enable_suggest_autoreporting=$enableval],
-    [enable_suggest_autoreporting=no]
-)
-
-AM_CONDITIONAL(SUGGEST_AUTOREPORTING, test "$enable_suggest_autoreporting" = "yes")
-
-# Authenticated autoreporting
-
-AC_ARG_ENABLE(authenticated-autoreporting,
-    AS_HELP_STRING([--enable-authenticated-autoreporting],
-    [enable authenticated autoreporting]),
-    [enable_authenticated_autoreporting=$enableval],
-    [enable_authenticated_autoreporting=no]
-)
-
-AM_CONDITIONAL(AUTHENTICATED_AUTOREPORTING, test "$enable_authenticated_autoreporting" = "yes")
 
 # Make satyr use GDB or elfutils/libunwind for unwinding?
 
@@ -347,18 +300,16 @@ AC_ARG_ENABLE([dump-time-unwind],
 [fi]
 
 AC_SUBST(CONF_DIR)
-AC_SUBST(DEFAULT_CONF_DIR)
 AC_SUBST(VAR_RUN)
 AC_SUBST(VAR_STATE)
 AC_SUBST(PLUGINS_CONF_DIR)
-AC_SUBST(DEFAULT_PLUGINS_CONF_DIR)
 AC_SUBST(EVENTS_CONF_DIR)
+AC_SUBST(JOURNAL_CATALOG_DIR)
 AC_SUBST(EVENTS_DIR)
 AC_SUBST(DEFAULT_DUMP_LOCATION)
 AC_SUBST(DEFAULT_DUMP_LOCATION_MODE)
 AC_SUBST(DEFAULT_DUMP_DIR_MODE)
 AC_SUBST(LIBREPORT_PLUGINS_CONF_DIR)
-AC_SUBST(PROBLEMS_CONFIG_INTERFACES_DIR)
 
 AC_ARG_WITH(bodhi,
 AS_HELP_STRING([--with-bodhi],[use Bodhi plugin (default is YES)]),
@@ -376,7 +327,6 @@ PKG_CHECK_MODULES([JSON_C], [json], [
 if test -z "$NO_BODHI"
 then
 PKG_CHECK_MODULES([LIBREPORT_WEB], [libreport-web])
-PKG_CHECK_MODULES([HAWKEY], [hawkey])
 AM_CONDITIONAL(BUILD_BODHI, true)
 else
 AM_CONDITIONAL(BUILD_BODHI, false)
@@ -392,6 +342,54 @@ AM_CONDITIONAL(BUILD_ATOMIC, true)
 else
 AM_CONDITIONAL(BUILD_ATOMIC, false)
 fi dnl end NO_BODHI
+
+AC_ARG_WITH(selinux,
+AS_HELP_STRING([--with-selinux],[build selinux support (default is YES)]),
+ABRT_PARSE_WITH([selinux]))
+
+[if test -z "$NO_SELINUX"]
+[then]
+    PKG_CHECK_MODULES([LIBSELINUX], [libselinux])
+    AM_CONDITIONAL(HAVE_SELINUX, true)
+[else]
+    AM_CONDITIONAL(HAVE_SELINUX, false)
+[fi]
+
+AC_ARG_WITH(rpm,
+AS_HELP_STRING([--with-rpm],[build rpm support (default is YES)]),
+ABRT_PARSE_WITH([rpm]))
+
+[if test -z "$NO_RPM"]
+[then]
+    PKG_CHECK_MODULES([RPM], [rpm])
+    AC_DEFINE(HAVE_LIBRPM, [], [Have rpm support.])
+[fi]
+
+AC_ARG_WITH(polkit,
+AS_HELP_STRING([--with-polkit],[build polkit support (default is YES)]),
+ABRT_PARSE_WITH([polkit]))
+
+[if test -z "$NO_POLKIT"]
+[then]
+    PKG_CHECK_MODULES([POLKIT], [polkit-gobject-1])
+    PKG_CHECK_MODULES([POLKIT_AGENT], [polkit-agent-1])
+    AC_DEFINE(HAVE_POLKIT, [], [Have polkit support.])
+    AC_SUBST([HAVE_POLKIT], ["True"])
+[else]
+    AC_SUBST([HAVE_POLKIT], ["False"])
+[fi]
+
+AC_ARG_WITH(retrace,
+    AS_HELP_STRING([--with-retrace],
+        [Add abrt-retrace-client plugin (default is YES)]),
+    ABRT_PARSE_WITH([retrace]))
+
+[if test -z "$NO_RETRACE"]
+[then]
+    AM_CONDITIONAL(BUILD_RETRACE_CLIENT, true)
+[else]
+    AM_CONDITIONAL(BUILD_RETRACE_CLIENT, false)
+[fi]
 
 # Initialize the test suite.
 AC_CONFIG_TESTDIR(tests)
@@ -412,9 +410,10 @@ AC_CONFIG_FILES([
 	apidoc/Makefile
 	apidoc/Doxyfile
 	apidoc/html/Makefile
+	data/Makefile
+	data/augeas/Makefile
 	doc/Makefile
 	doc/problems-service/Makefile
-	doc/dbus-configuration/Makefile
 	src/include/Makefile
 	src/lib/Makefile
 	src/plugins/Makefile
@@ -424,15 +423,16 @@ AC_CONFIG_FILES([
 	src/hooks/Makefile
 	src/applet/Makefile
 	src/cli/Makefile
-	src/cli-ng/Makefile
-	src/cli-ng/abrtcli/Makefile
-	src/cli-ng/tests/Makefile
-	src/cli-ng/tests/clitests/Makefile
+	src/cli/abrtcli/Makefile
+	src/cli/abrtcli/cli/Makefile
+	src/cli/tests/Makefile
+	src/cli/tests/clitests/Makefile
 	src/configuration-gui/Makefile
 	src/configuration-gui/abrt_gui.pc
 	src/dbus/Makefile
 	src/plugins/abrt-action-install-debuginfo
 	src/plugins/abrt-action-analyze-vmcore
+	src/plugins/abrt-action-analyze-vulnerability
 	src/plugins/abrt-action-check-oops-for-hw-error
 	src/plugins/abrt-action-check-oops-for-alt-component
 	src/python-problem/Makefile

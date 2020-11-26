@@ -54,8 +54,8 @@ rlJournalStart
 
     rlPhaseStartTest "list"
         generate_crash
-        get_crash_path
         wait_for_hooks
+        get_crash_path
 
         rlRun "abrt list | grep -i 'Id'"
         rlRun "abrt list | grep -i 'Component'"
@@ -68,7 +68,7 @@ rlJournalStart
     rlPhaseEnd
 
     rlPhaseStartTest "status"
-        rlRun "abrt status | grep 'has detected 1 problem'"
+        rlRun "abrt status | grep 'has detected a problem'"
     rlPhaseEnd
 
     rlPhaseStartTest "report NONEXISTENT"
@@ -83,8 +83,9 @@ rlJournalStart
         echo "cli_sanity_test_not_reportable" > $crash_PATH/type
         echo "cli_sanity_test_not_reportable" > $crash_PATH/analyzer
 
+        PROBLEM_ID=$(abrt list --format={short_id})
         rlRun "abrt report 2>&1 | tee abrt-cli-report-not-reportable.log" 0
-        rlAssertGrep "Problem '$crash_PATH' cannot be reported" abrt-cli-report-not-reportable.log
+        rlAssertGrep "Problem '$PROBLEM_ID' cannot be reported" abrt-cli-report-not-reportable.log
 
         cp -f type analyzer $crash_PATH
 

@@ -30,27 +30,27 @@
 
 TEST="upload-handling"
 PACKAGE="abrt"
+ABRT_CONF="/etc/abrt/abrt.conf"
 
 rlJournalStart
     rlPhaseStartSetup
-        rlFileBackup /etc/abrt/abrt.conf
+        rlFileBackup "$ABRT_CONF"
         TmpDir=$(mktemp -d)
-        cp -R problem_dir $TmpDir
-        pushd $TmpDir
+        cp -R problem_dir "$TmpDir"
+        pushd "$TmpDir"
         mkdir -p /var/spool/abrt-upload/
-        echo "WatchCrashdumpArchiveDir = /var/spool/abrt-upload/" > /etc/abrt/abrt.conf
+        rlRun "augtool set /files${ABRT_CONF}/WatchCrashdumpArchiveDir /var/spool/abrt-upload/" 0
         load_abrt_conf
         rlRun "setsebool -P abrt_anon_write 1"
-        rlRun "service abrtd stop" 0 "Killing abrtd"
-        rlRun "service abrtd start" 0 "Starting abrtd"
+        rlServiceStart abrtd
 
         # install upload watcher if available (not required on rhel6)
         upload_watch_pkg="abrt-addon-upload-watch"
-        if yum info $upload_watch_pkg &> /dev/null; then
-          yum -y install $upload_watch_pkg
-          rlRun "service abrt-upload-watch restart" 0 "Starting abrt-upload-watch"
+        if dnf info $upload_watch_pkg &> /dev/null; then
+          dnf -y install $upload_watch_pkg
+          rlServiceStop abrt-upload-watch
+          rlServiceStart abrt-upload-watch
         fi
-        rlRun "service abrt-ccpp restart" 0 "Start abrt-ccpp"
     rlPhaseEnd
 
     rlPhaseStartTest "handle upload"
@@ -63,15 +63,14 @@ rlJournalStart
         rem_upload_dir=$( echo $ABRT_CONF_DUMP_LOCATION/remote* )
         rlAssertExists "$rem_upload_dir/coredump"
 
-        ls -ld $rem_upload_dir
-        rlRun "ls -ld $rem_upload_dir | grep \"drwxr-x---\. [0-9]\+ root abrt \""
+        ls -ld "$rem_upload_dir"
+        rlRun "ls -ld '$rem_upload_dir' | grep \"drwxr-x---\. [0-9]\+ root abrt \""
 
-        pushd $rem_upload_dir
-        # do not check sosreport stuff
-        for elem in $(ls | egrep -v "sosreport\.log|$(hostname -s)");
+        pushd "$rem_upload_dir"
+        for elem in $(ls);
         do
-            ls -l $elem
-            rlRun "ls -l $elem | grep \".rw-r-----\. [0-9]\+ root abrt \""
+            ls -l "$elem"
+            rlRun "ls -l '$elem' | grep \".rw-r-----\. [0-9]\+ root abrt \""
         done
         popd
 
@@ -87,8 +86,8 @@ rlJournalStart
     rlPhaseStartTest "handle upload - sanitization"
         rm -f "/var/spool/abrt-upload/upload.tar.gz"
 
-        rlRun "touch $TmpDir/abrt_upload_test && ln -sf $TmpDir/abrt_upload_test problem_dir/malicious && mkdir -p problem_dir/dangerous && touch problem_dir/dangerous/contents"
-        rlRun "tar -czf $TmpDir/upload.tar.gz problem_dir && tar -tvzf $TmpDir/upload.tar.gz && cp $TmpDir/upload.tar.gz /var/spool/abrt-upload"
+        rlRun "touch '$TmpDir/abrt_upload_test' && ln -sf '$TmpDir/abrt_upload_test problem_dir/malicious' && mkdir -p problem_dir/dangerous && touch problem_dir/dangerous/contents"
+        rlRun "tar -czf '$TmpDir/upload.tar.gz' problem_dir && tar -tvzf '$TmpDir/upload.tar.gz' && cp '$TmpDir/upload.tar.gz' /var/spool/abrt-upload"
 
         wait_for_hooks
 
@@ -98,17 +97,17 @@ rlJournalStart
         rlAssertNotExists "$rem_upload_dir/malicious"
         rlAssertNotExists "$rem_upload_dir/dangerous"
 
-        rlRun "rm -rf problem_dir/malicious problem_dir/dangerous $TmpDir/abrt_upload_test"
+        rlRun "rm -rf problem_dir/malicious problem_dir/dangerous '$TmpDir/abrt_upload_test'"
     rlPhaseEnd
 
     rlPhaseStartCleanup
         popd # TmpDir
-        rm -rf $TmpDir
-        rm -rf $rem_upload_dir
+        rm -rf "$TmpDir"
+        rm -rf "$rem_upload_dir"
         rm -f "/var/spool/abrt-upload/upload.tar.gz"
         rlFileRestore
-        rlRun "service abrtd stop" 0 "Killing abrtd"
-        rlRun "service abrtd start" 0 "Starting abrtd"
+        rlServiceStop abrtd
+        rlServiceStart abrtd
     rlPhaseEnd
     rlJournalPrintText
 rlJournalEnd

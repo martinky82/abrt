@@ -32,7 +32,7 @@ TEST="journal_oops_processing"
 PACKAGE="abrt"
 ooPS_REQUIRED_FILES="kernel uuid duphash
 pkg_name pkg_arch pkg_epoch pkg_release pkg_version"
-EXAMPLES_PATH="../../../examples"
+EXAMPLES_PATH="../../examples"
 
 function test_single_oops
 {
@@ -92,7 +92,7 @@ function test_single_oops
     rlAssertGrep "kernel" "$crash_PATH/pkg_name"
     rlAssertGrep "$kernel_version" "$crash_PATH/pkg_version"
 
-    rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+    remove_problem_directory
 
     # Kill the dumper with TERM to verify that it can store its state.
     # Next time, the dumper should start following the journald from
@@ -154,6 +154,16 @@ rlJournalStart
             | grep -v "Version:" > \
             $TmpDir/oops5.right
 
+        sed "s/4.9.3-200.fc25.x86_64/<KERNEL_VERSION>/" \
+            $EXAMPLES_PATH/oops6.test > \
+            $TmpDir/oops6.test
+
+        sed "s/4.8.15-300.fc25.x86_64/<KERNEL_VERSION>/" \
+            $EXAMPLES_PATH/oops6.right \
+            | grep -v "abrt-dump-oops:" \
+            | grep -v "Version:" > \
+            $TmpDir/oops6.right
+
         sed "s/3.10.0-33.el7.ppc64/<KERNEL_VERSION>/" \
             $EXAMPLES_PATH/oops8_ppc64.test > \
             $TmpDir/oops8_ppc64.test
@@ -200,7 +210,7 @@ rlJournalStart
         rlRun "systemctl stop abrt-oops"
 
         # The stored cursor is not valid in testing configuration.
-        rlRun "rm -rf /var/lib/abrt/abrt-dupm-journal-oops.state"
+        rlRun "rm -rf /var/lib/abrt/abrt-dump-journal-oops.state"
     rlPhaseEnd
 
     rlPhaseStartTest OOPS
@@ -219,7 +229,7 @@ rlJournalStart
 
     rlPhaseStartCleanup
         # Do not confuse the system dumper. The stored cursor is invalid in the default configuration.
-        rlRun "rm -rf /var/lib/abrt/abrt-dupm-journal-oops.state"
+        rlRun "rm -rf /var/lib/abrt/abrt-dump-journal-oops.state"
 
         rlBundleLogs abrt $(echo *_ls) $(echo *.log)
         rlRun "popd"

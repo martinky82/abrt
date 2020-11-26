@@ -49,22 +49,22 @@ int main(int argc, char **argv)
     };
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_STRING('d', NULL, &dump_dir_name, "DIR", _("Problem directory")),
         OPT_END()
     };
-    /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
+    /*unsigned opts =*/ libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
     struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
     if (!dd)
         return 1;
 
-    char *component = dd_load_text(dd, FILENAME_COMPONENT);
+    g_autofree char *component = dd_load_text(dd, FILENAME_COMPONENT);
 
     /* Read backtrace */
-    char *backtrace_str = dd_load_text_ext(dd, FILENAME_BACKTRACE,
+    g_autofree char *backtrace_str = dd_load_text_ext(dd, FILENAME_BACKTRACE,
                                            DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE);
     if (!backtrace_str)
     {
@@ -77,31 +77,31 @@ int main(int argc, char **argv)
     sr_location_init(&location);
     const char *backtrace_str_ptr = backtrace_str;
     struct sr_gdb_stacktrace *backtrace = sr_gdb_stacktrace_parse(&backtrace_str_ptr, &location);
-    free(backtrace_str);
 
     /* Store backtrace hash */
     if (!backtrace)
     {
+        g_autofree char *checksum = NULL;
+
         /*
          * The parser failed. Compute the duphash from the executable
          * instead of a backtrace.
          * and component only.  This is not supposed to happen often.
          */
-        log(_("Backtrace parsing failed for %s"), dump_dir_name);
-        log("%d:%d: %s", location.line, location.column, location.message);
-        struct strbuf *emptybt = strbuf_new();
+        log_warning(_("Backtrace parsing failed for %s"), dump_dir_name);
+        log_warning("%d:%d: %s", location.line, location.column, location.message);
+        g_autoptr(GString) emptybt = g_string_new(NULL);
 
-        char *executable = dd_load_text(dd, FILENAME_EXECUTABLE);
-        strbuf_prepend_str(emptybt, executable);
-        free(executable);
+        g_autofree char *executable = dd_load_text(dd, FILENAME_EXECUTABLE);
+        g_string_prepend(emptybt, executable);
 
-        strbuf_prepend_str(emptybt, component);
+        g_string_prepend(emptybt, component);
 
-        log_debug("Generating duphash: %s", emptybt->buf);
-        char hash_str[SHA1_RESULT_LEN*2 + 1];
-        str_to_sha1str(hash_str, emptybt->buf);
+        log_debug("Generating duphash: %s", emptybt->str);
 
-        dd_save_text(dd, FILENAME_DUPHASH, hash_str);
+        checksum = g_compute_checksum_for_string(G_CHECKSUM_SHA1, emptybt->str, -1);
+
+        dd_save_text(dd, FILENAME_DUPHASH, checksum);
         /*
          * Other parts of ABRT assume that if no rating is available,
          * it is ok to allow reporting of the bug. To be sure no bad
@@ -110,8 +110,6 @@ int main(int argc, char **argv)
          */
         dd_save_text(dd, FILENAME_RATING, "0");
 
-        strbuf_free(emptybt);
-        free(component);
         dd_close(dd);
 
         /* Report success even if the parser failed, as the backtrace
@@ -131,23 +129,21 @@ int main(int argc, char **argv)
 
     if (crash_thread)
     {
-        char *hash_str;
+        g_autofree char *hash_str = NULL;
 
-        if (g_verbose >= 3)
+        if (libreport_g_verbose >= 3)
         {
             hash_str = sr_thread_get_duphash(crash_thread, 3, component,
                                              SR_DUPHASH_NOHASH);
-            log("Generating duphash: %s", hash_str);
-            free(hash_str);
+            log_warning("Generating duphash: %s", hash_str);
         }
 
         hash_str = sr_thread_get_duphash(crash_thread, 3, component,
                                          SR_DUPHASH_NORMAL);
         dd_save_text(dd, FILENAME_DUPHASH, hash_str);
-        free(hash_str);
     }
     else
-        log(_("Crash thread not found"));
+        log_warning(_("Crash thread not found"));
 
 
     /* Compute the backtrace rating. */
@@ -178,6 +174,5 @@ int main(int argc, char **argv)
     }
     sr_gdb_stacktrace_free(backtrace);
     dd_close(dd);
-    free(component);
     return 0;
 }

@@ -20,166 +20,199 @@
 
 #define ABRT_CONF "abrt.conf"
 
-char *        g_settings_sWatchCrashdumpArchiveDir = NULL;
-unsigned int  g_settings_nMaxCrashReportsSize = 1000;
-char *        g_settings_dump_location = NULL;
-bool          g_settings_delete_uploaded = 0;
-bool          g_settings_autoreporting = 0;
-char *        g_settings_autoreporting_event = NULL;
-bool          g_settings_shortenedreporting = 0;
-bool          g_settings_explorechroots = 0;
-unsigned int  g_settings_debug_level = 0;
+char *        abrt_g_settings_sWatchCrashdumpArchiveDir = NULL;
+unsigned int  abrt_g_settings_nMaxCrashReportsSize = 5000;
+char *        abrt_g_settings_dump_location = NULL;
+bool          abrt_g_settings_delete_uploaded = 0;
+bool          abrt_g_settings_autoreporting = 0;
+char *        abrt_g_settings_autoreporting_event = NULL;
+bool          abrt_g_settings_shortenedreporting = 0;
+bool          abrt_g_settings_explorechroots = 0;
+unsigned int  abrt_g_settings_debug_level = 0;
 
-void free_abrt_conf_data()
+void abrt_free_abrt_conf_data()
 {
-    free(g_settings_sWatchCrashdumpArchiveDir);
-    g_settings_sWatchCrashdumpArchiveDir = NULL;
+    free(abrt_g_settings_sWatchCrashdumpArchiveDir);
+    abrt_g_settings_sWatchCrashdumpArchiveDir = NULL;
 
-    free(g_settings_dump_location);
-    g_settings_dump_location = NULL;
+    free(abrt_g_settings_dump_location);
+    abrt_g_settings_dump_location = NULL;
+
+    free(abrt_g_settings_autoreporting_event);
+    abrt_g_settings_autoreporting_event = NULL;
 }
 
-static void ParseCommon(map_string_t *settings, const char *conf_filename)
+/* Beware - the function normalizes only slashes - that's the most often
+ * problem we have to face.
+ */
+static char *xstrdup_normalized_path(const char *path)
 {
-    const char *value;
+    const size_t len = strlen(path);
+    char *const res = g_malloc0(len + 1);
 
-    value = get_map_string_item_or_NULL(settings, "WatchCrashdumpArchiveDir");
+    res[0] = path[0];
+
+    const char *p = path + 1;
+    char *r = res;
+    for (; p - path < len; ++p)
+        if (*p != '/' || *r != '/')
+            *++r = *p;
+
+    /* remove trailing slash if the path is not '/' */
+    if (r - res > 1 && *r == '/')
+        *r = '\0';
+
+    return res;
+}
+
+static void ParseCommon(GHashTable *settings, const char *conf_filename)
+{
+    gpointer value;
+
+    value = g_hash_table_lookup(settings, "WatchCrashdumpArchiveDir");
     if (value)
     {
-        g_settings_sWatchCrashdumpArchiveDir = xstrdup(value);
-        remove_map_string_item(settings, "WatchCrashdumpArchiveDir");
+        abrt_g_settings_sWatchCrashdumpArchiveDir = xstrdup_normalized_path(value);
+        g_hash_table_remove(settings, "WatchCrashdumpArchiveDir");
     }
 
-    value = get_map_string_item_or_NULL(settings, "MaxCrashReportsSize");
+    value = g_hash_table_lookup(settings, "MaxCrashReportsSize");
     if (value)
     {
         char *end;
         errno = 0;
-        unsigned long ul = strtoul(value, &end, 10);
+        unsigned long ul = strtoul((char *)value, &end, 10);
         if (errno || end == value || *end != '\0' || ul > INT_MAX)
-            error_msg("Error parsing %s setting: '%s'", "MaxCrashReportsSize", value);
+            error_msg("Error parsing %s setting: '%s'", "MaxCrashReportsSize", (char *)value);
         else
-            g_settings_nMaxCrashReportsSize = ul;
-        remove_map_string_item(settings, "MaxCrashReportsSize");
+            abrt_g_settings_nMaxCrashReportsSize = ul;
+        g_hash_table_remove(settings, "MaxCrashReportsSize");
     }
 
-    value = get_map_string_item_or_NULL(settings, "DumpLocation");
+    value = g_hash_table_lookup(settings, "DumpLocation");
     if (value)
     {
-        g_settings_dump_location = xstrdup(value);
-        remove_map_string_item(settings, "DumpLocation");
-    }
-    else
-        g_settings_dump_location = xstrdup(DEFAULT_DUMP_LOCATION);
-
-    value = get_map_string_item_or_NULL(settings, "DeleteUploaded");
-    if (value)
-    {
-        g_settings_delete_uploaded = string_to_bool(value);
-        remove_map_string_item(settings, "DeleteUploaded");
-    }
-
-    value = get_map_string_item_or_NULL(settings, "AutoreportingEnabled");
-    if (value)
-    {
-        g_settings_autoreporting = string_to_bool(value);
-        remove_map_string_item(settings, "AutoreportingEnabled");
-    }
-
-    value = get_map_string_item_or_NULL(settings, "AutoreportingEvent");
-    if (value)
-    {
-        g_settings_autoreporting_event = xstrdup(value);
-        remove_map_string_item(settings, "AutoreportingEvent");
+        abrt_g_settings_dump_location = xstrdup_normalized_path((char *)value);
+        g_hash_table_remove(settings, "DumpLocation");
     }
     else
-        g_settings_autoreporting_event = xstrdup("report_uReport");
+        abrt_g_settings_dump_location = g_strdup(DEFAULT_DUMP_LOCATION);
 
-    value = get_map_string_item_or_NULL(settings, "ShortenedReporting");
+    value = g_hash_table_lookup(settings, "DeleteUploaded");
     if (value)
     {
-        g_settings_shortenedreporting = string_to_bool(value);
-        remove_map_string_item(settings, "ShortenedReporting");
+        abrt_g_settings_delete_uploaded = libreport_string_to_bool((char *)value);
+        g_hash_table_remove(settings, "DeleteUploaded");
+    }
+
+    value = g_hash_table_lookup(settings, "AutoreportingEnabled");
+    if (value)
+    {
+        abrt_g_settings_autoreporting = libreport_string_to_bool((char *)value);
+        g_hash_table_remove(settings, "AutoreportingEnabled");
+    }
+
+    value = g_hash_table_lookup(settings, "AutoreportingEvent");
+    if (value)
+    {
+        abrt_g_settings_autoreporting_event = g_strdup(value);
+        g_hash_table_remove(settings, "AutoreportingEvent");
+    }
+    else
+        abrt_g_settings_autoreporting_event = g_strdup("report_uReport");
+
+    value = g_hash_table_lookup(settings, "ShortenedReporting");
+    if (value)
+    {
+        abrt_g_settings_shortenedreporting = libreport_string_to_bool((char *)value);
+        g_hash_table_remove(settings, "ShortenedReporting");
     }
     else
     {
         /* Default: enabled for GNOME desktop, else disabled */
         const char *desktop_env = getenv("DESKTOP_SESSION");
-        g_settings_shortenedreporting = (desktop_env && strcasestr(desktop_env, "gnome") != NULL);
+        abrt_g_settings_shortenedreporting = (desktop_env && strcasestr(desktop_env, "gnome") != NULL);
     }
 
-    value = get_map_string_item_or_NULL(settings, "ExploreChroots");
+    value = g_hash_table_lookup(settings, "ExploreChroots");
     if (value)
     {
-        g_settings_explorechroots = string_to_bool(value);
-        remove_map_string_item(settings, "ExploreChroots");
+        abrt_g_settings_explorechroots = libreport_string_to_bool((char *)value);
+        g_hash_table_remove(settings, "ExploreChroots");
     }
     else
-        g_settings_explorechroots = false;
+        abrt_g_settings_explorechroots = false;
 
-    value = get_map_string_item_or_NULL(settings, "DebugLevel");
+    value = g_hash_table_lookup(settings, "DebugLevel");
     if (value)
     {
         char *end;
         errno = 0;
-        unsigned long ul = strtoul(value, &end, 10);
+        unsigned long ul = strtoul((char *)value, &end, 10);
         if (errno || end == value || *end != '\0' || ul > INT_MAX)
-            error_msg("Error parsing %s setting: '%s'", "DebugLevel", value);
+            error_msg("Error parsing %s setting: '%s'", "DebugLevel", (char *)value);
         else
-            g_settings_debug_level = ul;
-        remove_map_string_item(settings, "DebugLevel");
+            abrt_g_settings_debug_level = ul;
+        g_hash_table_remove(settings, "DebugLevel");
     }
 
     GHashTableIter iter;
-    const char *name;
-    /*char *value; - already declared */
-    init_map_string_iter(&iter, settings);
-    while (next_map_string_iter(&iter, &name, &value))
+    gpointer name;
+    g_hash_table_iter_init(&iter, settings);
+    while (g_hash_table_iter_next(&iter, &name, NULL))
     {
-        error_msg("Unrecognized variable '%s' in '%s'", name, conf_filename);
+        error_msg("Unrecognized variable '%s' in '%s'", (char *)name, conf_filename);
     }
 }
 
-int load_abrt_conf()
+static const char *get_abrt_conf_file_name(void)
 {
-    free_abrt_conf_data();
+    const char *const abrt_conf = getenv("ABRT_CONF_FILE_NAME");
+    return abrt_conf == NULL ? ABRT_CONF : abrt_conf;
+}
 
-    map_string_t *settings = new_map_string();
-    if (!load_abrt_conf_file(ABRT_CONF, settings))
-        perror_msg("Can't load '%s'", ABRT_CONF);
+int abrt_load_abrt_conf()
+{
+    abrt_free_abrt_conf_data();
 
-    ParseCommon(settings, ABRT_CONF);
-    free_map_string(settings);
+    const char *const abrt_conf = get_abrt_conf_file_name();
+    g_autoptr(GHashTable) settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    if (!abrt_load_abrt_conf_file(abrt_conf, settings))
+        perror_msg("Can't load '%s'", abrt_conf);
+
+    ParseCommon(settings, abrt_conf);
 
     return 0;
 }
 
-int load_abrt_conf_file(const char *file, map_string_t *settings)
+int abrt_load_abrt_conf_file(const char *file, GHashTable *settings)
 {
-    static const char *const base_directories[] = { DEFAULT_CONF_DIR, CONF_DIR, NULL };
+    const char *env_conf_dir = getenv("ABRT_CONF_DIR");
+    const char *const conf_directories[] = {
+        env_conf_dir ? env_conf_dir : CONF_DIR,
+        NULL
+    };
 
-    return load_conf_file_from_dirs(file, base_directories, settings, /*skip key w/o values:*/ false);
+    return libreport_load_conf_file_from_dirs(file, conf_directories, settings, /*skip key w/o values:*/ false);
 }
 
-int load_abrt_plugin_conf_file(const char *file, map_string_t *settings)
+int abrt_load_abrt_plugin_conf_file(const char *file, GHashTable *settings)
 {
-    static const char *const base_directories[] = { DEFAULT_PLUGINS_CONF_DIR, PLUGINS_CONF_DIR, NULL };
+    static const char *const conf_directories[] = { PLUGINS_CONF_DIR, NULL };
 
-    return load_conf_file_from_dirs(file, base_directories, settings, /*skip key w/o values:*/ false);
+    return libreport_load_conf_file_from_dirs(file, conf_directories, settings, /*skip key w/o values:*/ false);
 }
 
-int save_abrt_conf_file(const char *file, map_string_t *settings)
+int abrt_save_abrt_conf_file(const char *file, GHashTable *settings)
 {
-    char *path = concat_path_file(CONF_DIR, file);
-    int retval = save_conf_file(path, settings);
-    free(path);
+    g_autofree char *path = g_build_filename(CONF_DIR ? CONF_DIR : "", file, NULL);
+    int retval = libreport_save_conf_file(path, settings);
     return retval;
 }
 
-int save_abrt_plugin_conf_file(const char *file, map_string_t *settings)
+int abrt_save_abrt_plugin_conf_file(const char *file, GHashTable *settings)
 {
-    char *path = concat_path_file(PLUGINS_CONF_DIR, file);
-    int retval = save_conf_file(path, settings);
-    free(path);
+    g_autofree char *path = g_build_filename(PLUGINS_CONF_DIR ? PLUGINS_CONF_DIR : "", file, NULL);
+    int retval = libreport_save_conf_file(path, settings);
     return retval;
 }

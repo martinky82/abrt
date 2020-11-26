@@ -22,25 +22,21 @@
 #ifndef RPM_H_
 #define RPM_H_
 
-#include <rpm/rpmts.h>
-#include <rpm/rpmcli.h>
-#include <rpm/rpmdb.h>
-#include <rpm/rpmpgp.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-struct pkg_envra {
+struct pkg_nevra {
     char *p_nvr;
-    char *p_epoch;
     char *p_name;
+    char *p_epoch;
     char *p_version;
     char *p_release;
     char *p_arch;
+    char *p_vendor;
 };
 
-void free_pkg_envra(struct pkg_envra *p);
+void free_pkg_nevra(struct pkg_nevra *p);
 
 /**
  * Checks if an application is modified by third party.
@@ -69,13 +65,27 @@ void rpm_load_gpgkey(const char* filename);
 int rpm_chk_fingerprint(const char* pkg);
 
 /**
+ * A function, which checks if the given finger print is imported.
+ * @param pkg A package name.
+ * @return 1 if imported, otherwise (not-imported, or error) 0
+ */
+int rpm_fingerprint_is_imported(const char* fingerprint);
+
+/**
+ * A function, which returns package's finger print
+ * @param pkg A package name.
+ * @return NULL if not-valid, otherwise malloced NULL-terminated string.
+ */
+char *rpm_get_fingerprint(const char* pkg);
+
+/**
  * Gets a package name. This package contains particular
  * file. If the file doesn't belong to any package, empty string is
  * returned.
  * @param filename A file name.
  * @return A package name (malloc'ed string)
  */
-struct pkg_envra *rpm_get_package_nvr(const char *filename, const char *rootdir_or_NULL);
+struct pkg_nevra *rpm_get_package_nvr(const char *filename, const char *rootdir_or_NULL);
 /**
  * Finds a main package for given file. This package contains particular
  * file. If the file doesn't belong to any package, empty string is

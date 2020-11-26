@@ -27,9 +27,6 @@
 #include "libabrt.h"
 #include <assert.h>
 
-#define ABRT_CONFIG_WIDGET_GET_PRIVATE(o) \
-    (G_TYPE_INSTANCE_GET_PRIVATE((o), TYPE_ABRT_CONFIG_WIDGET, AbrtConfigWidgetPrivate))
-
 #define WID(s) GTK_WIDGET(gtk_builder_get_object(self->priv->builder, s))
 
 #define UI_FILE_NAME "abrt-config-widget.glade"
@@ -49,7 +46,7 @@
  */
 typedef struct {
     char *app_name;             ///< e.g abrt-applet, org.gnome.desktop.privacy
-    map_string_t *settings;     ///< ABRT configuration file
+    GHashTable *settings;     ///< ABRT configuration file
     GSettings *glib_settings;   ///< GSettings
 } AbrtAppConfiguration;
 
@@ -107,12 +104,12 @@ struct AbrtConfigWidgetPrivate {
     AbrtConfigWidgetOption options[_ABRT_OPT_END_];
 };
 
-G_DEFINE_TYPE(AbrtConfigWidget, abrt_config_widget, GTK_TYPE_BOX)
+G_DEFINE_TYPE_WITH_PRIVATE(AbrtConfigWidget, abrt_config_widget, GTK_TYPE_BOX)
 
 enum {
     SN_CHANGED,
     SN_LAST_SIGNAL
-} SignalNumber;
+};
 
 static guint s_signals[SN_LAST_SIGNAL] = { 0 };
 
@@ -123,13 +120,13 @@ static void abrt_config_widget_finalize(GObject *object);
 static AbrtAppConfiguration *
 abrt_app_configuration_new(const char *app_name)
 {
-    AbrtAppConfiguration *conf = xmalloc(sizeof(*conf));
+    AbrtAppConfiguration *conf = g_new(AbrtAppConfiguration, 1);
 
-    conf->app_name = xstrdup(app_name);
-    conf->settings = new_map_string();
+    conf->app_name = g_strdup(app_name);
+    conf->settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     conf->glib_settings = NULL;
 
-    if(!load_app_conf_file(conf->app_name, conf->settings)) {
+    if(!libreport_load_app_conf_file(conf->app_name, conf->settings)) {
         g_warning("Failed to load config for '%s'", conf->app_name);
     }
 
@@ -141,9 +138,9 @@ abrt_app_configuration_new(const char *app_name)
 static AbrtAppConfiguration *
 abrt_app_configuration_new_glib(const char *schema)
 {
-    AbrtAppConfiguration *conf = xmalloc(sizeof(*conf));
+    AbrtAppConfiguration *conf = g_new(AbrtAppConfiguration, 1);
 
-    conf->app_name = xstrdup(schema);
+    conf->app_name = g_strdup(schema);
     conf->settings = NULL;
     conf->glib_settings = g_settings_new(conf->app_name);
 
@@ -154,9 +151,9 @@ static void
 abrt_app_configuration_set_value(AbrtAppConfiguration *conf, const char *name, const char *value)
 {
     if (conf->settings)
-        set_app_user_setting(conf->settings, name, value);
+        libreport_set_app_user_setting(conf->settings, name, value);
     else if (conf->glib_settings)
-        g_settings_set_boolean(conf->glib_settings, name, string_to_bool(value));
+        g_settings_set_boolean(conf->glib_settings, name, libreport_string_to_bool(value));
     else
         assert(!"BUG: not properly initialized AbrtAppConfiguration");
 }
@@ -166,7 +163,7 @@ abrt_app_configuration_get_value(AbrtAppConfiguration *conf, const char *name)
 {
     if (conf->settings)
     {
-        const char *val = get_app_user_setting(conf->settings, name);
+        const char *val = libreport_get_app_user_setting(conf->settings, name);
         return (val == NULL || strcmp(val, "") == 0) ? NULL : val;
     }
 
@@ -180,7 +177,7 @@ static void
 abrt_app_configuration_save(AbrtAppConfiguration *conf)
 {
     if (conf->settings)
-        save_app_conf_file(conf->app_name, conf->settings);
+        libreport_save_app_conf_file(conf->app_name, conf->settings);
 
     /* No need to save GSettings because changes are applied instantly */
 }
@@ -196,7 +193,8 @@ abrt_app_configuration_free(AbrtAppConfiguration *conf)
 
     if (conf->settings)
     {
-        free_map_string(conf->settings);
+        if (conf->settings)
+            g_hash_table_destroy(conf->settings);
         conf->settings = (void *)0xDEADBEAF;
     }
 
@@ -213,8 +211,6 @@ abrt_config_widget_class_init(AbrtConfigWidgetClass *klass)
     GObjectClass *object_class = G_OBJECT_CLASS(klass);
 
     object_class->finalize = abrt_config_widget_finalize;
-
-    g_type_class_add_private(klass, sizeof(AbrtConfigWidgetPrivate));
 
     s_signals[SN_CHANGED] = g_signal_new ("changed",
                              G_TYPE_FROM_CLASS (klass),
@@ -305,7 +301,7 @@ update_option_switch_current_value(AbrtConfigWidget *self, enum AbrtOptions opid
     if (option->config != NULL)
         val = abrt_app_configuration_get_value(option->config, option->name);
 
-    option->current_value = val ? string_to_bool(val) : option->default_value;
+    option->current_value = val ? libreport_string_to_bool(val) : option->default_value;
 }
 
 static void
@@ -321,7 +317,7 @@ update_option_radio_button_current_value(AbrtConfigWidget *self, enum AbrtOption
 
     if (val == NULL)
         option->current_value = option->default_value;
-    else if (string_to_bool(val))
+    else if (libreport_string_to_bool(val))
         option->current_value = ABRT_RADIOBUTTON_OPT_ALWAYS;
     else
         option->current_value = ABRT_RADIOBUTTON_OPT_NEVER;
@@ -413,7 +409,7 @@ abrt_config_widget_init(AbrtConfigWidget *self)
 {
     GError *error = NULL;
 
-    self->priv = ABRT_CONFIG_WIDGET_GET_PRIVATE(self);
+    self->priv = abrt_config_widget_get_instance_private(self);
 
     self->priv->builder = gtk_builder_new();
     gtk_builder_set_translation_domain(self->priv->builder, GETTEXT_PACKAGE);
@@ -432,7 +428,7 @@ abrt_config_widget_init(AbrtConfigWidget *self)
     }
 
     /* Load configuration */
-    load_abrt_conf();
+    abrt_load_abrt_conf();
 
     self->priv->report_gtk_conf = abrt_app_configuration_new("report-gtk");
     self->priv->abrt_applet_conf = abrt_app_configuration_new("abrt-applet");
@@ -454,7 +450,7 @@ abrt_config_widget_init(AbrtConfigWidget *self)
     /* abrt-applet */
     self->priv->options[ABRT_OPT_SEND_UREPORT].name = "report-technical-problems";
     self->priv->options[ABRT_OPT_SEND_UREPORT].default_value =
-            string_to_bool(abrt_app_configuration_get_value(self->priv->privacy_gsettings,
+            libreport_string_to_bool(abrt_app_configuration_get_value(self->priv->privacy_gsettings,
                                                             "report-technical-problems"));
     {
         /* Get the container widget for the lauch button and warnings */
@@ -467,39 +463,37 @@ abrt_config_widget_init(AbrtConfigWidget *self)
             gpp_app = "gnome-privacy-panel.desktop";
 
         GDesktopAppInfo *app = g_desktop_app_info_new(gpp_app);
-        char *message = NULL;
-        char *markup = NULL;
+        g_autofree char *message = NULL;
+        g_autofree char *markup = NULL;
         if (!app)
         {
             /* Make the switch editable */
             self->priv->options[ABRT_OPT_SEND_UREPORT].config = self->priv->privacy_gsettings;
 
-            char *os_release = xmalloc_open_read_close("/etc/os-release", /*no size limit*/NULL);
-            char *privacy_policy = NULL;
+            g_autofree char *os_release = libreport_xmalloc_open_read_close("/etc/os-release", /*no size limit*/NULL);
+            g_autofree char *privacy_policy = NULL;
 
             /* Try to get the value of PRIVACY_POLICY from /etc/os-release */
             sr_parse_os_release(os_release, os_release_callback, (void *)&privacy_policy);
 
-            message = xasprintf(_("The configuration option above has been moved to GSettings and "
-                                  "the switch is linked to the value of the setting 'report-technical-problems' "
-                                  "from the schema 'org.gnome.desktop.privacy'."));
+            message = g_strdup_printf(_("The configuration option above has been moved to GSettings and "
+                                        "the switch is linked to the value of the setting 'report-technical-problems' "
+                                        "from the schema 'org.gnome.desktop.privacy'."));
 
             /* Do not add Privacy Policy link if /etc/os-release does not contain PRIVACY_POLICY */
             if (privacy_policy != NULL)
-                markup = xasprintf("<i>%s</i>\n\n<a href=\"%s\">Privacy Policy</a>", message, privacy_policy);
+                markup = g_strdup_printf("<i>%s</i>\n\n<a href=\"%s\">Privacy Policy</a>", message, privacy_policy);
             else
-                markup = xasprintf("<i>%s</i>", message);
+                markup = g_strdup_printf("<i>%s</i>", message);
 
-            free(privacy_policy);
-            free(os_release);
         }
         else
         {
             /* Make the switch read-only */
             self->priv->options[ABRT_OPT_SEND_UREPORT].config = NULL;
 
-            message = xasprintf(_("The configuration option above can be configured in"));
-            markup = xasprintf("<i>%s</i>", message);
+            message = g_strdup_printf(_("The configuration option above can be configured in"));
+            markup = g_strdup_printf("<i>%s</i>", message);
 
             GtkWidget *launcher = gtk_button_new_with_label(g_app_info_get_display_name(G_APP_INFO(app)));
 
@@ -510,7 +504,7 @@ abrt_config_widget_init(AbrtConfigWidget *self)
              * from GObject which offers a functionality for attaching an
              * arbitrary data to its instances. The last argument is a function
              * called to destroy the arbirarty data when the instance is being
-             * destoryed. */
+             * destroyed. */
             g_object_set_data_full(G_OBJECT(launcher), "launched-app", app, g_object_unref);
             g_signal_connect(launcher, "clicked", G_CALLBACK(pp_launcher_clicked), NULL);
 
@@ -519,7 +513,7 @@ abrt_config_widget_init(AbrtConfigWidget *self)
             gtk_widget_set_hexpand(launcher, FALSE);
             gtk_widget_set_vexpand(launcher, FALSE);
 
-            /* Make the launcher button alligned on center of the warning. */
+            /* Make the launcher button aligned on center of the warning. */
             gtk_widget_set_halign(launcher, GTK_ALIGN_CENTER);
             gtk_widget_set_valign(launcher, GTK_ALIGN_CENTER);
 
@@ -534,14 +528,11 @@ abrt_config_widget_init(AbrtConfigWidget *self)
         /* Let users to copy the warning. */
         gtk_label_set_selectable(GTK_LABEL(lbl), TRUE);
 
-        free(markup);
-        free(message);
-
         gtk_box_pack_start(GTK_BOX(hbox_auto_reporting), lbl, false, false, 0);
     }
 
     self->priv->options[ABRT_OPT_SHORTENED_REPORTING].name = "ShortenedReporting";
-    self->priv->options[ABRT_OPT_SHORTENED_REPORTING].default_value = g_settings_shortenedreporting;
+    self->priv->options[ABRT_OPT_SHORTENED_REPORTING].default_value = abrt_g_settings_shortenedreporting;
     self->priv->options[ABRT_OPT_SHORTENED_REPORTING].config = self->priv->abrt_applet_conf;
 
     self->priv->options[ABRT_OPT_SILENT_SHORTENED_REPORTING].name = "SilentShortenedReporting";
@@ -564,14 +555,8 @@ abrt_config_widget_init(AbrtConfigWidget *self)
     connect_switch_with_option(self, ABRT_OPT_SILENT_SHORTENED_REPORTING, "switch_silent_shortened_reporting");
     connect_switch_with_option(self, ABRT_OPT_NOTIFY_INCOMPLETE_PROBLEMS, "switch_notify_incomplete_problems");
 
-#if ((GTK_MAJOR_VERSION == 3 && GTK_MINOR_VERSION < 13) || (GTK_MAJOR_VERSION == 3 && GTK_MINOR_VERSION == 13 && GTK_MICRO_VERSION == 1))
-    /* https://developer.gnome.org/gtk3/3.13/GtkWidget.html#gtk-widget-reparent */
-    /* gtk_widget_reparent has been deprecated since version 3.13.2 and should not be used in newly-written code. */
-    gtk_widget_reparent(WID("grid"), GTK_WIDGET(self));
-#else
     gtk_container_remove(GTK_CONTAINER(WID("window1")), WID("grid"));
     gtk_container_add(GTK_CONTAINER(self), WID("grid"));
-#endif
 
     /* Set the initial state of the properties */
     gtk_widget_show_all(GTK_WIDGET(self));

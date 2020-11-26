@@ -31,76 +31,51 @@ int vdprintf(int d, const char *format, va_list ap);
 #endif
 
 
-#define low_free_space abrt_low_free_space
 /**
   @brief Checks if there is enough free space to store the problem data
 
   @param setting_MaxCrashReportsSize Maximum data size
   @param dump_location Location to check for the available space
 */
-int low_free_space(unsigned setting_MaxCrashReportsSize, const char *dump_location);
+int abrt_low_free_space(unsigned setting_MaxCrashReportsSize, const char *dump_location);
 
-#define trim_problem_dirs abrt_trim_problem_dirs
-void trim_problem_dirs(const char *dirname, double cap_size, const char *exclude_path);
-#define ensure_writable_dir_id abrt_ensure_writable_dir_uid_git
-void ensure_writable_dir_uid_gid(const char *dir, mode_t mode, uid_t uid, gid_t gid);
-#define ensure_writable_dir abrt_ensure_writable_dir
-void ensure_writable_dir(const char *dir, mode_t mode, const char *user);
-#define ensure_writable_dir_group abrt_ensure_writable_dir_group
-void ensure_writable_dir_group(const char *dir, mode_t mode, const char *user, const char *group);
-#define run_unstrip_n abrt_run_unstrip_n
-char *run_unstrip_n(const char *dump_dir_name, unsigned timeout_sec);
-#define get_backtrace abrt_get_backtrace
-char *get_backtrace(const char *dump_dir_name, unsigned timeout_sec, const char *debuginfo_dirs);
+void abrt_trim_problem_dirs(const char *dirname, double cap_size, const char *exclude_path);
+void abrt_ensure_writable_dir_uid_gid(const char *dir, mode_t mode, uid_t uid, gid_t gid);
+void abrt_ensure_writable_dir(const char *dir, mode_t mode, const char *user);
+void abrt_ensure_writable_dir_group(const char *dir, mode_t mode, const char *user, const char *group);
+char *abrt_run_unstrip_n(const char *dump_dir_name, unsigned timeout_sec);
+char *abrt_get_backtrace(struct dump_dir *dd, unsigned timeout_sec, const char *debuginfo_dirs);
 
-#define dir_is_in_dump_location abrt_dir_is_in_dump_location
-bool dir_is_in_dump_location(const char *dir_name);
+bool abrt_dir_is_in_dump_location(const char *dir_name);
 
 enum {
     DD_PERM_EVENTS  = 1 << 0,
     DD_PERM_DAEMONS = 1 << 1,
 };
-#define dir_has_correct_permissions abrt_dir_has_correct_permissions
-bool dir_has_correct_permissions(const char *dir_name, int flags);
-#define allowed_new_user_problem_entry abrt_allowed_new_user_problem_entry
-bool allowed_new_user_problem_entry(uid_t uid, const char *name, const char *value);
+bool abrt_dir_has_correct_permissions(const char *dir_name, int flags);
+bool abrt_new_user_problem_entry_allowed(uid_t uid, const char *name, const char *value);
 
-#define g_settings_nMaxCrashReportsSize abrt_g_settings_nMaxCrashReportsSize
-extern unsigned int  g_settings_nMaxCrashReportsSize;
-#define g_settings_sWatchCrashdumpArchiveDir abrt_g_settings_sWatchCrashdumpArchiveDir
-extern char *        g_settings_sWatchCrashdumpArchiveDir;
-#define g_settings_dump_location abrt_g_settings_dump_location
-extern char *        g_settings_dump_location;
-#define g_settings_delete_uploaded abrt_g_settings_delete_uploaded
-extern bool          g_settings_delete_uploaded;
-#define g_settings_autoreporting abrt_g_settings_autoreporting
-extern bool          g_settings_autoreporting;
-#define g_settings_autoreporting_event abrt_g_settings_autoreporting_event
-extern char *        g_settings_autoreporting_event;
-#define g_settings_shortenedreporting abrt_g_settings_shortenedreporting
-extern bool          g_settings_shortenedreporting;
-#define g_settings_explorechroots abrt_g_settings_explorechroots
-extern bool          g_settings_explorechroots;
-#define g_settings_debug_level abrt_g_settings_debug_level
-extern unsigned int  g_settings_debug_level;
+extern unsigned int  abrt_g_settings_nMaxCrashReportsSize;
+extern char *        abrt_g_settings_sWatchCrashdumpArchiveDir;
+extern char *        abrt_g_settings_dump_location;
+extern bool          abrt_g_settings_delete_uploaded;
+extern bool          abrt_g_settings_autoreporting;
+extern char *        abrt_g_settings_autoreporting_event;
+extern bool          abrt_g_settings_shortenedreporting;
+extern bool          abrt_g_settings_explorechroots;
+extern unsigned int  abrt_g_settings_debug_level;
 
 
-#define load_abrt_conf abrt_load_abrt_conf
-int load_abrt_conf(void);
-#define free_abrt_conf_data abrt_free_abrt_conf_data
-void free_abrt_conf_data(void);
+int abrt_load_abrt_conf(void);
+void abrt_free_abrt_conf_data(void);
 
-#define load_abrt_conf_file abrt_load_abrt_conf_file
-int load_abrt_conf_file(const char *file, map_string_t *settings);
+int abrt_load_abrt_conf_file(const char *file, GHashTable *settings);
 
-#define load_abrt_plugin_conf_file abrt_load_abrt_plugin_conf_file
-int load_abrt_plugin_conf_file(const char *file, map_string_t *settings);
+int abrt_load_abrt_plugin_conf_file(const char *file, GHashTable *settings);
 
-#define save_abrt_conf_file abrt_save_abrt_conf_file
-int save_abrt_conf_file(const char *file, map_string_t *settings);
+int abrt_save_abrt_conf_file(const char *file, GHashTable *settings);
 
-#define save_abrt_plugin_conf_file abrt_save_abrt_plugin_conf_file
-int save_abrt_plugin_conf_file(const char *file, map_string_t *settings);
+int abrt_save_abrt_plugin_conf_file(const char *file, GHashTable *settings);
 
 
 void migrate_to_xdg_dirs(void);
@@ -108,34 +83,35 @@ void migrate_to_xdg_dirs(void);
 int check_recent_crash_file(const char *filename, const char *executable);
 
 /* Returns 1 if abrtd daemon is running, 0 otherwise. */
-#define daemon_is_ok abrt_daemon_is_ok
-int daemon_is_ok(void);
+int abrt_daemon_is_ok(void);
 
 /**
 @brief Sends notification to abrtd that a new problem has been detected
 
 @param[in] path Path to the problem directory containing the problem data
 */
-#define notify_new_path abrt_notify_new_path
-void notify_new_path(const char *path);
+void abrt_notify_new_path(const char *path);
+
+/**
+@brief Sends notification to abrtd that a new problem has been detected and
+wait for the reply
+
+@param path Path to the problem directory containing the problem data
+@param message The abrtd reply
+@return -errno on error otherwise return value of abrtd
+*/
+int abrt_notify_new_path_with_response(const char *path, char **message);
 
 /* Note: should be public since unit tests need to call it */
-#define koops_extract_version abrt_koops_extract_version
-char *koops_extract_version(const char *line);
-#define kernel_tainted_short abrt_kernel_tainted_short
-char *kernel_tainted_short(const char *kernel_bt);
-#define kernel_tainted_long abrt_kernel_tainted_long
-char *kernel_tainted_long(const char *tainted_short);
-#define koops_hash_str_ext abrt_koops_hash_str_ext
-int koops_hash_str_ext(char hash_str[SHA1_RESULT_LEN*2 + 1], const char *oops_buf, int frame_count, int duphas_flags);
-#define koops_hash_str abrt_koops_hash_str
-int koops_hash_str(char hash_str[SHA1_RESULT_LEN*2 + 1], const char *oops_buf);
+char *abrt_koops_extract_version(const char *line);
+char *abrt_kernel_tainted_short(const char *kernel_bt);
+char *abrt_kernel_tainted_long(const char *tainted_short);
+char *abrt_koops_hash_str_ext(const char *oops_buf, int frame_count, int duphas_flags);
+char *abrt_koops_hash_str(const char *oops_buf);
 
 
-#define koops_line_skip_level abrt_koops_line_skip_level
-int koops_line_skip_level(const char **c);
-#define koops_line_skip_jiffies abrt_koops_line_skip_jiffies
-void koops_line_skip_jiffies(const char **c);
+int abrt_koops_line_skip_level(const char **c);
+void abrt_koops_line_skip_jiffies(const char **c);
 
 /*
  * extract_oops tries to find oops signatures in a log
@@ -145,22 +121,18 @@ struct abrt_koops_line_info {
     int level;
 };
 
-#define koops_extract_oopses_from_lines abrt_koops_extract_oopses_from_lines
-void koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_line_info *lines_info, int lines_info_size);
-#define koops_extract_oopses abrt_koops_extract_oopses
-void koops_extract_oopses(GList **oops_list, char *buffer, size_t buflen);
-#define koops_suspicious_strings_list abrt_koops_suspicious_strings_list
-GList *koops_suspicious_strings_list(void);
-#define koops_print_suspicious_strings abrt_koops_print_suspicious_strings
-void koops_print_suspicious_strings(void);
+void abrt_koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_line_info *lines_info, int lines_info_size);
+void abrt_koops_extract_oopses(GList **oops_list, char *buffer, size_t buflen);
+GList *abrt_koops_suspicious_strings_list(void);
+GList *abrt_koops_suspicious_strings_blacklist(void);
+void abrt_koops_print_suspicious_strings(void);
 /**
  * Prints all suspicious strings that do not match any of the regular
  * expression in NULL terminated list.
  *
  * The regular expression should be compiled with REG_NOSUB flag.
  */
-#define koops_print_suspicious_strings_filtered abrt_koops_print_suspicious_strings_filtered
-void koops_print_suspicious_strings_filtered(const regex_t **filterout);
+void abrt_koops_print_suspicious_strings_filtered(const regex_t **filterout);
 
 /* dbus client api */
 
@@ -239,95 +211,6 @@ problem_data_t *get_full_problem_data_over_dbus(const char *problem_dir_path);
   @return List of problem ids or ERR_PTR on failure (NULL is an empty list)
 */
 GList *get_problems_over_dbus(bool authorize);
-
-/**
-  @struct ignored_problems
-  @brief An opaque structure holding a list of ignored problems
-*/
-typedef struct ignored_problems ignored_problems_t;
-
-/**
-  @brief Initializes a new instance of ignored problems
-
-  @param file_path A malloced string holding a path to a file containing the list of ignored problems. Function takes ownership of the malloced memory, which will be freed in ignored_problems_free()
-  @see ignored_problems_free()
-  @return Fully initialized instance of ignored problems struct which must be destroyed by ignored_problems_free()
-*/
-ignored_problems_t *ignored_problems_new(char *file_path);
-
-/**
-  @brief Destroys an instance of ignored problems
-
-  This function never fails. Supports the common behaviour where it accepts
-  NULL pointers.
-
-  @param set A destroyed instance
-*/
-void ignored_problems_free(ignored_problems_t *set);
-
-/**
-  @brief Adds a problem to the ignored problems
-
-  This function never fails. All errors will be logged.
-
-  @param set An instance of ignored problems to which the problem will be added
-  @param problem_id An identifier of a problem which will be added to an ignored set
-*/
-void ignored_problems_add(ignored_problems_t *set, const char *problem_id);
-
-/**
-  @brief Removes a problem from the ignored problems
-
-  This function never fails. All errors will be logged.
-
-  @param set An instance of ignored problems from which the problem will be deleted
-  @param problem_id An identifier of a problem which will be removed from an ignored problems struct
-*/
-void ignored_problems_remove(ignored_problems_t *set, const char *problem_id);
-
-/**
-  @brief Checks if a problem is in the ignored problems
-
-  This function never fails. All errors will be logged. If any error occurs,
-  the function returns 0 value.
-
-  @param set An instance of ignored problems in which the problem will be searched
-  @param problem_id An identifier of a problem
-  @return Non 0 value if the problem is ignored; otherwise returns 0 value.
-*/
-bool ignored_problems_contains(ignored_problems_t *set, const char *problem_id);
-
-/**
-  @brief Adds a problem defined by its data to the ignored problems
-
-  This function never fails. All errors will be logged.
-
-  @param set An instance of ignored problems to which the problem will be added
-  @param pd A data of a problem which will be added to an ignored set
-*/
-void ignored_problems_add_problem_data(ignored_problems_t *set, problem_data_t *pd);
-
-/**
-  @brief Removes a problem defined by its data from the ignored problems
-
-  This function never fails. All errors will be logged.
-
-  @param set An instance of ignored problems from which the problem will be deleted
-  @param pd A data of a problem which will be removed from an ignored problems struct
-*/
-void ignored_problems_remove_problem_data(ignored_problems_t *set, problem_data_t *pd);
-
-/**
-  @brief Checks if a problem defined its data is in the ignored problems
-
-  This function never fails. All errors will be logged. If any error occurs,
-  the function returns 0 value.
-
-  @param set An instance of ignored problems in which the problem will be searched
-  @param pd A data of a problem
-  @return Non 0 value if the problem is ignored; otherwise returns 0 value.
-*/
-bool ignored_problems_contains_problem_data(ignored_problems_t *set, problem_data_t *pd);
 
 #ifdef __cplusplus
 }

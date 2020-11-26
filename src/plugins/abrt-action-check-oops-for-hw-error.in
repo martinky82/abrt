@@ -6,6 +6,8 @@ import locale
 import gettext
 import hashlib
 import re
+import subprocess
+from systemd import journal
 
 GETTEXT_PROGNAME = "abrt"
 
@@ -13,32 +15,38 @@ _ = gettext.gettext
 
 def file_has_string(filename, string):
     try:
-        f = open(filename, "r")
-    except IOError as e:
-        #print e
-        return False
-    for line in f:
-        if string in line:
-            f.close()
-            return True
-    f.close()
+        with open(filename, "r") as f:
+            for line in f:
+                if string in line:
+                    return True
+    except OSError as ex:
+        sys.stderr.write("Failed to read file '%s': %s\n"
+                         % (filename, str(ex)))
+    except ValueError as ex:
+        sys.stderr.write("Invalid data in file '%s': %s\n"
+                         % (filename, str(ex)))
     return False
 
 
 def tail_with_search(filename, string, maxlen):
+    # return empty list on error
+    retval = []
     try:
-        f = open(filename, "r")
-    except IOError as e:
-        #print e
-        return []
-    l = []
-    for line in f:
-        if string in line:
-            l.append(line)
-            if len(l) > maxlen:
-                del l[0]
-    f.close()
-    return l
+        with open(filename, "r") as f:
+            l = []
+            for line in f:
+                if string in line:
+                    l.append(line)
+                    if len(l) > maxlen:
+                        del l[0]
+            retval = l
+    except OSError as ex:
+        sys.stderr.write("Failed to read file '%s': %s\n"
+                         % (filename, str(ex)))
+    except ValueError as ex:
+        sys.stderr.write("Invalid data in file '%s': %s\n"
+                         % (filename, str(ex)))
+    return retval
 
 
 def open_or_die(filename, mode):
@@ -50,19 +58,28 @@ def open_or_die(filename, mode):
     return f
 
 
+def journal_has_string(identifier, string):
+    j = journal.Reader()
+    j.this_boot()
+    j.this_machine()
+    j.log_level(journal.LOG_INFO)
+    j.add_match(SYSLOG_IDENTIFIER=identifier, MESSAGE=string)
+
+    return bool(list(j))
+
+
+def tail_journal_with_search(identifier, maxlen):
+    args = ['journalctl', '-b', '-n', str(maxlen), '-t', str(identifier)]
+    logs = subprocess.check_output(args, stderr=subprocess.STDOUT, universal_newlines=True)
+    return logs
+
+
 if __name__ == "__main__":
     try:
         locale.setlocale(locale.LC_ALL, "")
     except locale.Error:
         os.environ['LC_ALL'] = 'C'
         locale.setlocale(locale.LC_ALL, "")
-
-    # Defeat "AttributeError: 'module' object has no attribute 'nl_langinfo'"
-    try:
-        gettext.bind_textdomain_codeset(GETTEXT_PROGNAME,
-                                        locale.nl_langinfo(locale.CODESET))
-    except AttributeError:
-        pass
 
     gettext.bindtextdomain(GETTEXT_PROGNAME, '/usr/share/locale')
     gettext.textdomain(GETTEXT_PROGNAME)
@@ -102,6 +119,9 @@ if __name__ == "__main__":
         with open_or_die("kernel", "w") as krnlfile:
             krnlfile.write(kernel)
 
+    with open_or_die("mce", "w") as f:
+        f.write("fatal" if vmcore_mce else "non-fatal")
+
     # vmcore MCEs already have good backtrace element, nothing more to do
     if vmcore_mce:
         sys.exit(0)
@@ -122,9 +142,25 @@ if __name__ == "__main__":
         f.close()
         sys.exit(0)
     #
+    # Check systemd-journal for MCEs.
+    #
+    if journal_has_string("mcelog", "Hardware event. This is not a software error."):
+        f = open_or_die("backtrace", "w")
+        f.write("The kernel log indicates that hardware errors were detected.\n")
+        f.write("System log may have more information.\n")
+        f.write("The last 20 mcelog lines of system log are:\n")
+        f.write("==========================================\n")
+        # print last 20 journal messages
+        # journalctl -b -n20 -t mcelog
+        l = tail_journal_with_search('mcelog', 20)
+        for line in l:
+            f.write(line)
+        f.close()
+        sys.exit(0)
+    #
     # On RHEL7, mcelog is run so that its output ends up in syslog.
     # Do we see that?
-    if file_has_string("/var/log/messages", "mcelog: Hardware event"):
+    elif file_has_string("/var/log/messages", "mcelog: Hardware event"):
         f = open_or_die("backtrace", "w")
         f.write("The kernel log indicates that hardware errors were detected.\n")
         f.write("System log may have more information.\n")

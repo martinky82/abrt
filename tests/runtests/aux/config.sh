@@ -32,7 +32,7 @@ export DISABLE_AUTOREPORTING=1
 export STORE_CONFIGS=1
 
 # - mailx script config -
-export MAILTO='rmarko@redhat.com'
+export MAILTO='jfilak@redhat.com'
 export MAILFROM='abrt-testsuite-bot@redhat.com'
 
 # - scp script config -
@@ -48,23 +48,31 @@ export REINSTALL_BEFORE_EACH_TEST=0
 export RESTORE_CONFIGS_BEFORE_EACH_TEST=1
 export CLEAN_SPOOL_BEFORE_EACH_TEST=1
 export DUMP_PACKAGE_VERSIONS=1
+# Ensures that a test will not hang forever.
+# See man timeout for more details about the format.
+export TEST_TIMEOUT=15m
 
 # - misc
 export PACKAGES="abrt \
-                 abrt-addon-* \
+                 abrt-addon-ccpp \
+                 abrt-addon-kerneloops \
+                 abrt-addon-pstoreoops \
+                 python3-abrt-addon \
+                 abrt-addon-upload-watch \
+                 abrt-addon-vmcore \
+                 abrt-addon-xorg \
                  abrt-desktop \
                  abrt-cli \
                  abrt-devel \
-                 abrt-python \
-                 abrt-cli-ng \
+                 python3-abrt \
                  abrt-console-notification \
                  libreport \
                  libreport-plugin-bugzilla \
-                 libreport-plugin-rhtsupport \
                  libreport-plugin-reportuploader \
                  libreport-plugin-mailx \
                  libreport-plugin-ureport \
                  libreport-plugin-logger \
                  libreport-plugin-mantisbt \
+                 libreport-plugin-systemd-journal \
                  satyr \
                  will-crash"

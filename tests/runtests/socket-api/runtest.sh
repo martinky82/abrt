@@ -42,9 +42,9 @@ rlPhaseStartSetup
         check_prior_crashes
 
         rlFileBackup $CFG_FILE
-        sed -i 's/ProcessUnpackaged = no/ProcessUnpackaged = yes/g' $CFG_FILE
+        rlRun "augtool set /files${CFG_FILE}/ProcessUnpackaged yes" 0
 
-        rlRun "yum install -y abrt-devel libreport-devel" 0 "installed required devel packages"
+        rlRun "dnf install -y abrt-devel libreport-devel" 0 "installed required devel packages"
 
         TmpDir=$(mktemp -d)
         cp $TEST_APP_SRC $TmpDir
@@ -59,7 +59,7 @@ rlPhaseStartSetup
     rlPhaseEnd
 
     rlPhaseStartCleanup
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
         popd #TmpDir
         rm -rf $TmpDir
         rlFileRestore # CFG_FILE

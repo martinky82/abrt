@@ -18,11 +18,42 @@ package.m4: Makefile.in
              echo 'm4_define([AT_PACKAGE_URL],' && \
              echo '  [@PACKAGE_URL@])'; \
 	} >'package.m4'
-EXTRA_DIST = package.m4 ignored_problems_data
+EXTRA_DIST = package.m4
 
 ## ------------ ##
 ## Test suite.  ##
 ## ------------ ##
+
+TESTSUITE_FILES =
+TESTSUITE_FILES += examples/koops-tainted-g.template
+TESTSUITE_FILES += examples/koops-tainted-insane.template
+TESTSUITE_FILES += examples/koops-tainted-spaces
+TESTSUITE_FILES += examples/cut_here.right
+TESTSUITE_FILES += examples/oops-kernel-3.x.x
+TESTSUITE_FILES += examples/oops1.right
+TESTSUITE_FILES += examples/koops-tainted-bg1
+TESTSUITE_FILES += examples/oops-same-as-oops4.right
+TESTSUITE_FILES += examples/oops4.right
+TESTSUITE_FILES += examples/oops-same-as-oops4.right
+TESTSUITE_FILES += examples/hash-gen-oops6.right
+TESTSUITE_FILES += examples/hash-gen-short-oops.right
+TESTSUITE_FILES += examples/hash-gen-same-as-oops6.right
+TESTSUITE_FILES += examples/oops-with-jiffies.test
+TESTSUITE_FILES += examples/oops-with-jiffies.right
+TESTSUITE_FILES += examples/oops_recursive_locking1.test
+TESTSUITE_FILES += examples/oops_recursive_locking1.right
+TESTSUITE_FILES += examples/nmi_oops.test.template
+TESTSUITE_FILES += examples/nmi_oops.right
+TESTSUITE_FILES += examples/nmi_oops_hash.test
+TESTSUITE_FILES += examples/nmi_oops_hash.right
+TESTSUITE_FILES += examples/oops10_s390x.test
+TESTSUITE_FILES += examples/oops10_s390x.right
+TESTSUITE_FILES += examples/kernel_panic_oom.test
+TESTSUITE_FILES += examples/kernel_panic_oom.right
+TESTSUITE_FILES += examples/debug_messages.test
+TESTSUITE_FILES += examples/debug_messages.right
+TESTSUITE_FILES += examples/oops_unsupported_hw.test
+TESTSUITE_FILES += examples/oops_broken_bios.test
 
 TESTSUITE_AT = \
   local.at \
@@ -30,17 +61,21 @@ TESTSUITE_AT = \
   pyhook.at \
   koops-parser.at \
   xorg-utils.at \
-  ignored_problems.at \
-  hooklib.at
+  hooklib.at \
+  abrt_conf.at
 
-EXTRA_DIST += $(TESTSUITE_AT)
+EXTRA_DIST += $(TESTSUITE_AT) $(TESTSUITE_FILES)
 TESTSUITE = $(srcdir)/testsuite
 MAINTAINERCLEANFILES = Makefile.in $(TESTSUITE)
-check_DATA = atconfig atlocal $(TESTSUITE)
+check_DATA = atconfig atlocal prepare-data $(TESTSUITE)
 DISTCLEANFILES = atconfig
 EXTRA_DIST += atlocal.in
 EXTRA_DIST += koops-test.h
 EXTRA_DIST += GList_append.supp
+EXTRA_DIST += examples/prepare-data
+
+prepare-data:
+	${top_builddir}/tests/examples/prepare-data
 
 atconfig: $(top_builddir)/config.status
 	(cd ${top_builddir} && ./config.status ${subdir}/atconfig)
@@ -52,7 +87,7 @@ check-local: $(check_DATA)
 maintainer-check-valgrind: $(check_DATA)
 	$(MAKE) check-local \
 		PRE_AT_CHECK='$(abs_top_builddir)/libtool --mode=execute $(VALGRIND)' \
-		VALGRIND_OPTS='--tool=memcheck --leak-check=full --show-reachable=yes --error-exitcode=1 --suppressions=$(abs_top_builddir)/tests/GList_append.supp -q'
+		VALGRIND_OPTS='--tool=memcheck --leak-check=full --show-reachable=yes --errors-for-leak-kinds=definite,indirect --error-exitcode=1 --suppressions=$(abs_top_builddir)/tests/GList_append.supp -q'
 
 .PHONY: maintainer-check
 maintainer-check: maintainer-check-valgrind

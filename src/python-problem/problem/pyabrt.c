@@ -21,7 +21,7 @@
 #include "problem_data.h"
 #include "common.h"
 
-/* C: void notify_new_path(const char *path); */
+/* C: void abrt_notify_new_path(const char *path); */
 PyObject *p_notify_new_path(PyObject *pself, PyObject *args)
 {
     const char *path;
@@ -29,15 +29,15 @@ PyObject *p_notify_new_path(PyObject *pself, PyObject *args)
     {
         return NULL;
     }
-    notify_new_path(path);
+    abrt_notify_new_path(path);
     Py_RETURN_NONE;
 }
 
 static PyObject *
-load_settings_to_dict(const char *file, int (*loader)(const char *, map_string_t *))
+load_settings_to_dict(const char *file, int (*loader)(const char *, GHashTable *))
 {
     PyObject *dict = NULL;
-    map_string_t *settings = new_map_string();
+    g_autoptr(GHashTable) settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     if (!loader(file, settings))
     {
         PyErr_SetString(PyExc_OSError, "Failed to load configuration file.");
@@ -50,27 +50,25 @@ load_settings_to_dict(const char *file, int (*loader)(const char *, map_string_t
         goto lacf_error;
     }
 
-    map_string_iter_t iter;
-    const char *key = NULL;
-    const char *value = NULL;
-    init_map_string_iter(&iter, settings);
-    while(next_map_string_iter(&iter, &key, &value))
+    GHashTableIter iter;
+    gpointer key = NULL;
+    gpointer value = NULL;
+    g_hash_table_iter_init(&iter, settings);
+    while(g_hash_table_iter_next(&iter, &key, &value))
     {
-        if (0 != PyDict_SetItemString(dict, key, PyUnicode_FromString(value)))
+        if (0 != PyDict_SetItemString(dict, (char *)key, PyUnicode_FromString((char *)value)))
         {
             goto lacf_error;
         }
     }
-    free_map_string(settings);
     return dict;
 
 lacf_error:
     Py_XDECREF(dict);
-    free_map_string(settings);
     return NULL;
 }
 
-/* C: void load_abrt_conf_file(const char *file, map_string_t *settings); */
+/* C: void abrt_load_abrt_conf_file(const char *file, GHashTable *settings); */
 PyObject *p_load_conf_file(PyObject *pself, PyObject *args)
 {
     const char *file;
@@ -78,10 +76,10 @@ PyObject *p_load_conf_file(PyObject *pself, PyObject *args)
     {
         return NULL;
     }
-    return load_settings_to_dict(file, load_abrt_conf_file);
+    return load_settings_to_dict(file, abrt_load_abrt_conf_file);
 }
 
-/* C: void load_abrt_plugin_conf_file(const char *file, map_string_t *settings); */
+/* C: void abrt_load_abrt_plugin_conf_file(const char *file, GHashTable *settings); */
 PyObject *p_load_plugin_conf_file(PyObject *pself, PyObject *args)
 {
     const char *file;
@@ -89,5 +87,5 @@ PyObject *p_load_plugin_conf_file(PyObject *pself, PyObject *args)
     {
         return NULL;
     }
-    return load_settings_to_dict(file, load_abrt_plugin_conf_file);
+    return load_settings_to_dict(file, abrt_load_abrt_plugin_conf_file);
 }

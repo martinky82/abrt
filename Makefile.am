@@ -1,84 +1,28 @@
 ACLOCAL_AMFLAGS = -I m4
-SUBDIRS = src doc po icons tests apidoc
-
-DISTCHECK_CONFIGURE_FLAGS = \
-        --with-systemdsystemunitdir=$$dc_install_base/$(systemdsystemunitdir)
-
-TESTSUITE_FILES =
-TESTSUITE_FILES += examples/koops-tainted-g
-TESTSUITE_FILES += examples/koops-tainted-insane
-TESTSUITE_FILES += examples/koops-tainted-spaces
-TESTSUITE_FILES += examples/cut_here.right
-TESTSUITE_FILES += examples/oops-kernel-3.x.x
-TESTSUITE_FILES += examples/oops1.right
-TESTSUITE_FILES += examples/koops-tainted-bg1
-TESTSUITE_FILES += examples/oops-same-as-oops4.right
-TESTSUITE_FILES += examples/oops4.right
-TESTSUITE_FILES += examples/oops-same-as-oops4.right
-TESTSUITE_FILES += examples/hash-gen-oops6.right
-TESTSUITE_FILES += examples/hash-gen-short-oops.right
-TESTSUITE_FILES += examples/hash-gen-same-as-oops6.right
-TESTSUITE_FILES += examples/oops-with-jiffies.test
-TESTSUITE_FILES += examples/oops-with-jiffies.right
-TESTSUITE_FILES += examples/oops_recursive_locking1.test
-TESTSUITE_FILES += examples/oops_recursive_locking1.right
-TESTSUITE_FILES += examples/nmi_oops.test
-TESTSUITE_FILES += examples/nmi_oops.right
-TESTSUITE_FILES += examples/nmi_oops_hash.test
-TESTSUITE_FILES += examples/nmi_oops_hash.right
-TESTSUITE_FILES += examples/oops10_s390x.test
-TESTSUITE_FILES += examples/oops10_s390x.right
-TESTSUITE_FILES += examples/oops_unsupported_hw.test
-TESTSUITE_FILES += examples/oops_broken_bios.test
-
+SUBDIRS = data src doc po icons tests apidoc
 
 EXTRA_DIST = doc/coding-style abrt.spec.in abrt.pc.in \
-	abrt-version asciidoc.conf init-scripts/* $(TESTSUITE_FILES) \
-	augeas/test_abrt.aug
+	abrt-version asciidoc.conf init-scripts/*
+
+dist_doc_DATA = README.md
 
 pkgconfigdir = $(libdir)/pkgconfig
 pkgconfig_DATA = abrt.pc
 
-augeasdir = $(AUGEAS_LENS_LIB_DIR)
-dist_augeas_DATA = augeas/abrt.aug
-
-check-local:
-	$(AUGPARSE) -I $(top_builddir)/augeas $(top_builddir)/augeas/test_abrt.aug
-
-if HAVE_SYSTEMD
-    dist_systemdsystemunit_DATA = init-scripts/abrtd.service \
-                                  init-scripts/abrt-ccpp.service \
-                                  init-scripts/abrt-journal-core.service \
-                                  init-scripts/abrt-oops.service \
-                                  init-scripts/abrt-xorg.service \
-                                  init-scripts/abrt-pstoreoops.service \
-                                  init-scripts/abrt-upload-watch.service
+systemdsystemunitdir = $(prefix)/lib/systemd/system
+dist_systemdsystemunit_DATA = init-scripts/abrtd.service \
+                              init-scripts/abrt-journal-core.service \
+                              init-scripts/abrt-oops.service \
+                              init-scripts/abrt-xorg.service \
+                              init-scripts/abrt-pstoreoops.service \
+                              init-scripts/abrt-upload-watch.service
 
 if BUILD_ADDON_VMCORE
-    dist_systemdsystemunit_DATA += init-scripts/abrt-vmcore.service
+dist_systemdsystemunit_DATA += init-scripts/abrt-vmcore.service
 endif
 
-if BUILD_ATOMIC
-    dist_systemdsystemunit_DATA += init-scripts/abrt-coredump-helper.service
-endif
-
-    systemdtmpfilesdir = $(prefix)/lib/tmpfiles.d
-    systemdtmpfiles_DATA = init-scripts/abrt.conf
-else
-    sysv_initdir = $(sysconfdir)/rc.d/init.d/
-    sysv_init_SCRIPTS = init-scripts/abrtd \
-                        init-scripts/abrt-ccpp \
-                        init-scripts/abrt-oops \
-                        init-scripts/abrt-xorg \
-                        init-scripts/abrt-vmcore \
-                        init-scripts/abrt-pstoreoops \
-                        init-scripts/abrt-upload-watch
-
-if BUILD_ADDON_VMCORE
-    sysv_init_SCRIPTS += init-scripts/abrt-vmcore
-endif
-
-endif
+systemdtmpfilesdir = $(prefix)/lib/tmpfiles.d
+systemdtmpfiles_DATA = init-scripts/abrt.conf
 
 RPM_DIRS = --define "_sourcedir `pwd`" \
 	   --define "_rpmdir `pwd`/build" \
@@ -102,9 +46,9 @@ srpm:
 # e.g: make scratch-build DIST=f15
 DIST=rawhide
 scratch-build: srpm
-	koji build --scratch dist-$(DIST) `make srpm | grep Wrote | cut -d' ' -f2`
+	koji build --scratch $(DIST) `make srpm | grep Wrote | cut -d' ' -f2`
 
-UPLOAD_URL ?= fedorahosted.org:abrt
+UPLOAD_URL ?= localhost
 
 upload: dist
 	scp $(distdir).tar.gz $$(test -n "$$UPLOAD_LOGIN" && echo "$$UPLOAD_LOGIN@")$(UPLOAD_URL)
@@ -132,12 +76,17 @@ release-major:
 
 .PHONY: release
 release:
-	echo "* $$(date +'%a %b %d %Y') $$(git config --get user.name) <$$(git config --get user.email)> $$NEW_VER-1" > /tmp/changelog.tmp; \
-	git log --oneline $$OLD_VER..HEAD | awk '{$$1=""; print "-" $$0} END {print ""}' | grep -v -e "- Merge" -e "- testsuite:" >> /tmp/changelog.tmp; \
-	sed "$$(grep -n changelog abrt.spec.in | cut -f1 -d:)"'r /tmp/changelog.tmp' -i abrt.spec.in; \
-	git add abrt.spec.in; \
-	git commit -m "New version $$NEW_VER"; \
-	git tag "$$NEW_VER"; \
+	echo "* $$(LC_TIME='en_US.UTF-8' date +'%a %b %d %Y') $$(git config --get user.name) <$$(git config --get user.email)> $$NEW_VER-1" | sort > /tmp/changelog.tmp
+	git log --oneline $$OLD_VER..HEAD | awk '{$$1=""; if (a[$$0]++ == 0) print "-" $$0} END {print ""}' | grep -v -e "- Merge" -e "- testsuite:" -e "- make:" >> /tmp/changelog.tmp
+	sed "$$(grep -n changelog abrt.spec.in | cut -f1 -d: | head -1)"'r /tmp/changelog.tmp' -i abrt.spec.in
+	sed -e "s/^## \[Unreleased\]/## [Unreleased]\n\n## [$$NEW_VER]\n[\/\/] # (Please sum up added, changed, removed and fixed features here. See below for examples.)/" \
+	    -e "s/^\[Unreleased\]: \(https:\/\/.*\/compare\)\(\/.*\)\.\.\.HEAD/[Unreleased]: \1\/$$NEW_VER...HEAD\n[$$NEW_VER]: \1\2...$$NEW_VER/" \
+	    -i CHANGELOG.md
+	$${EDITOR:-vi} CHANGELOG.md
+	sed 's|DEF_VER=.*$$|DEF_VER='$$NEW_VER'|' -i gen-version
+	git add gen-version abrt.spec.in CHANGELOG.md
+	git commit -m "New version $$NEW_VER"
+	git tag "$$NEW_VER"
 	echo -n "$$NEW_VER" > abrt-version
 	autoconf --force
-	$(MAKE) upload
+	$(MAKE) dist

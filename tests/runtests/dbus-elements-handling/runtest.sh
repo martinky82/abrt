@@ -32,6 +32,8 @@ TEST="dbus-elements-handling"
 PACKAGE="abrt"
 STAT="stat --format=%A,%U,%G"
 
+ABRT_CONF=/etc/abrt/abrt.conf
+
 function abrtDBusNewProblem() {
     args=analyzer,libreport,executable,$(which true),uuid,$(date +%s.%N)
 
@@ -133,29 +135,10 @@ function abrtElementsHandlingTest() {
 }
 
 function abrtMaxCrashReportsSizeTest() {
-    resp=`su $2 -c "python <<EOF
-import dbus
-import sys
-proxy=dbus.SystemBus().get_object('org.freedesktop.problems', '/org/freedesktop/problems')
-iface=dbus.Interface(proxy, 'org.freedesktop.problems')
-try:
-    iface.SetElement(\"$1\", \"onemibofx\", 1024*1024*\"x\")
-except dbus.exceptions.DBusException as e:
-    print \"%s: %s\" % (e.get_dbus_name(), e.get_dbus_message())
-EOF"`
+    rlRun "resp=\$(./set_element.py $1 onemibofx 1 1024)"
     rlAssertEquals "No free space detected" "_$resp" "_org.freedesktop.problems.Failure: No problem space left"
 
-    resp=`su $2 -c "python <<EOF
-import dbus
-import sys
-proxy=dbus.SystemBus().get_object('org.freedesktop.problems', '/org/freedesktop/problems')
-iface=dbus.Interface(proxy, 'org.freedesktop.problems')
-try:
-    iface.SetElement(\"$1\", \"onemibofx\", 512*1024*\"x\")
-    iface.SetElement(\"$1\", \"onemibofx\", 512*1024*\"x\")
-except dbus.exceptions.DBusException as e:
-    print \"%s: %s\" % (e.get_dbus_name(), e.get_dbus_message())
-EOF"`
+    rlRun "resp=\$(./set_element.py $1 onemibofx 2 512)"
     rlAssertEquals "Size limit correctly checks the size limit according to a new size of an element" "_$resp" "_"
 }
 
@@ -168,13 +151,13 @@ rlJournalStart
         export -f abrtDBusDelElement
         export -f abrtDBusGetElement
         # Set limit to 1Midk
-        rlRun "OLDCRASHSIZE=\"$(augtool print /files/etc/abrt/abrt.conf/MaxCrashReportsSize | tr -d '=\"')\"" 0 "Create a backup of abrt configuration"
-        rlRun "augtool set /files/etc/abrt/abrt.conf/MaxCrashReportsSize 1" 0 "Set limit for crash reports to 1MiB"
+        rlRun "OLDCRASHSIZE=\"$(augtool print /files${ABRT_CONF}/MaxCrashReportsSize | tr -d '=\"')\"" 0 "Create a backup of abrt configuration"
+        rlRun "augtool set /files${ABRT_CONF}/MaxCrashReportsSize 1" 0 "Set limit for crash reports to 1MiB"
 
         # set only if option PrivateReports exists
-        grep -q PrivateReports /etc/abrt/abrt.conf && \
-        old_private_reports_value=`augtool get /files/etc/abrt/abrt.conf/PrivateReports | cut -d'=' -f2` && \
-        rlRun "augtool set /files/etc/abrt/abrt.conf/PrivateReports no" 0 "Set PrivateReports to no"
+        grep -q PrivateReports $ABRT_CONF && \
+        old_private_reports_value=`augtool get /files${ABRT_CONF}/PrivateReports | cut -d'=' -f2` && \
+        rlRun "augtool set /files${ABRT_CONF}/PrivateReports no" 0 "Set PrivateReports to no"
 
         rlRun "systemctl restart abrtd.service" 0 "Restart abrt service"
 
@@ -187,12 +170,6 @@ rlJournalStart
         fi
 
         wait_for_hooks
-        roots_problem_path="$(abrt-cli list $ABRT_CONF_DUMP_LOCATION | awk -v id=$roots_problem '$0 ~ "Directory:.*"id { print $2 }')"
-        if [ -z "$roots_problem_path" ]; then
-            rlDie "Not found path"
-        fi
-
-        rlRun "rm -f $roots_problem_path/sosreport.tar.*"
 
         prepare
         rlLog "Create a problem data as the unprivileged user"
@@ -202,12 +179,6 @@ rlJournalStart
         fi
 
         wait_for_hooks
-        unprivilegeds_problem_path="$(abrt-cli list $ABRT_CONF_DUMP_LOCATION | awk -v id=$unprivilegeds_problem '$0 ~ "Directory:.*"id { print $2 }')"
-        if [ -z "$unprivilegeds_problem_path" ]; then
-            rlDie "Not found path"
-        fi
-
-        rlRun "rm -f $unprivilegeds_problem_path/sosreport.tar.*"
     rlPhaseEnd
 
     rlPhaseStartTest "Sanity tests"
@@ -231,14 +202,14 @@ rlJournalStart
     rlPhaseEnd
 
     rlPhaseStartCleanup
-        rlRun "abrt-cli rm $roots_problem_path" 0 "Remove roots crash directory"
-        rlRun "abrt-cli rm $unprivilegeds_problem_path" 0 "Remove users crash directory"
+        rlRun "abrt remove -f $roots_problem_path" 0 "Remove roots crash directory"
+        rlRun "abrt remove -f $unprivilegeds_problem_path" 0 "Remove users crash directory"
     rlPhaseEnd
 
     rlPhaseStartSetup
-        rlRun "systemctl stop abrtd.service" 0 "Stop abrtd before cleaning of the dump location"
+        rlServiceStop abrtd
         rlRun "rm -rf $ABRT_CONF_DUMP_LOCATION/*" 0 "Clean the dump location"
-        rlRun "systemctl start abrtd.service" 0 "Start abrtd after cleaning of the dump location"
+        rlServiceStart abrtd abrt-journal-core
 
         prepare
         rlLog "Create a problem data as the root user"
@@ -248,12 +219,6 @@ rlJournalStart
         fi
 
         wait_for_hooks
-        roots_problem_path="$(abrt-cli list $ABRT_CONF_DUMP_LOCATION | awk -v id=$roots_problem '$0 ~ "Directory:.*"id { print $2 }')"
-        if [ -z "$roots_problem_path" ]; then
-            rlDie "Not found path problem path"
-        fi
-
-        rlRun "rm -f $roots_problem_path/sosreport.tar.*"
 
         prepare
         rlLog "Create a problem data as the unprivileged user"
@@ -263,12 +228,6 @@ rlJournalStart
         fi
 
         wait_for_hooks
-        unprivilegeds_problem_path="$(abrt-cli list $ABRT_CONF_DUMP_LOCATION | awk -v id=$unprivilegeds_problem '$0 ~ "Directory:.*"id { print $2 }')"
-        if [ -z "$unprivilegeds_problem_path" ]; then
-            rlDie "Not found path problem path"
-        fi
-
-        rlRun "rm -f $unprivilegeds_problem_path/sosreport.tar.*"
 
         prepare
         rlLog "Create a problem data as the unprivileged user"
@@ -278,12 +237,6 @@ rlJournalStart
         fi
 
         wait_for_hooks
-        second_unprivilegeds_problem_path="$(abrt-cli list $ABRT_CONF_DUMP_LOCATION | awk -v id=$second_unprivilegeds_problem '$0 ~ "Directory:.*"id { print $2 }')"
-        if [ -z "$second_unprivilegeds_problem_path" ]; then
-            rlDie "Not found path problem path"
-        fi
-
-        rlRun "rm -f $second_unprivilegeds_problem_path/sosreport.tar.*"
     rlPhaseEnd
 
     rlPhaseStartTest "Handle elements as a user"
@@ -313,13 +266,13 @@ rlJournalStart
         rlRun "userdel -r -f abrtdbustestanother" 0 "Remove the another test user"
 
         # set only if option PrivateReports exists
-        grep -q PrivateReports /etc/abrt/abrt.conf && \
-        rlRun "augtool set /files/etc/abrt/abrt.conf/PrivateReports $old_private_reports_value" 0 "Set PrivateReports to yes"
+        grep -q PrivateReports $ABRT_CONF && \
+        rlRun "augtool set /files${ABRT_CONF}/PrivateReports $old_private_reports_value" 0 "Set PrivateReports to yes"
 
         if [ -n "$OLDCRASHSIZE" ]; then
             rlRun "augtool set $OLDCRASHSIZE" 0
         else
-            rlRun "augtool rm /files/etc/abrt/abrt.conf/MaxCrashReportsSize" 0
+            rlRun "augtool rm /files${ABRT_CONF}/MaxCrashReportsSize" 0
         fi
         rlRun "systemctl restart abrtd.service" 0 "Restart abrtd after configuration changes"
         rlRun "rm -rf -- $ABRT_CONF_DUMP_LOCATION/*"

@@ -1,0 +1,35 @@
+abrt-dump-oops: Found oopses: 1
+
+Version: 4.8.15-300.fc25.x86_64
+traps: chrome[2979] trap invalid opcode ip:55911b28dba3 sp:7ffea558a3e0 error:0
+ in chrome[55911728a000+6a0b000]
+chrome: page allocation failure: order:5, mode:0x24040c0(GFP_KERNEL|__GFP_COMP)
+CPU: 0 PID: 2979 Comm: chrome Not tainted 4.8.15-300.fc25.x86_64 #1
+Hardware name: Gigabyte Technology Co., Ltd. Z87M-D3H/Z87M-D3H, BIOS F11 08/12/2014
+ ffffa9660e293738 ffffffff833f3ddd ffffffff83c507c8 0000000000000001
+ ffffa9660e2937c0 ffffffff831cc45a 024040c090d21e80 ffffffff83c507c8
+ ffffa9660e293760 ffffa96600000010 ffffa9660e2937d0 ffffa9660e293780
+Call Trace:
+ [<ffffffff833f3ddd>] dump_stack+0x63/0x86
+ [<ffffffff831cc45a>] warn_alloc+0x13a/0x170
+ [<ffffffff831cc176>] ? __alloc_pages_direct_compact+0x46/0xf0
+ [<ffffffff831cc752>] __alloc_pages_slowpath+0x252/0xb40
+ [<ffffffff831cd331>] __alloc_pages_nodemask+0x2f1/0x340
+ [<ffffffff83222ff5>] alloc_pages_current+0x95/0x140
+ [<ffffffff831ee158>] kmalloc_order+0x18/0x40
+ [<ffffffff831ee1a4>] kmalloc_order_trace+0x24/0xa0
+ [<ffffffff8323072d>] __kmalloc+0x1cd/0x1f0
+ [<ffffffff832bac67>] ? elf_core_dump+0xb67/0x1590
+ [<ffffffff832bad1d>] elf_core_dump+0xc1d/0x1590
+ [<ffffffff8381a306>] ? schedule_timeout+0x226/0x3f0
+ [<ffffffff832c0c8e>] do_coredump+0x55e/0xed0
+ [<ffffffff830cdd39>] ? try_to_wake_up+0x59/0x3d0
+ [<ffffffff830b235d>] get_signal+0x27d/0x630
+ [<ffffffff83026067>] do_signal+0x37/0x690
+ [<ffffffff830b0f89>] ? force_sig_info+0xc9/0xe0
+ [<ffffffff83026cf9>] ? do_trap+0x69/0x140
+ [<ffffffff83027119>] ? do_error_trap+0x89/0x110
+ [<ffffffff830b37a4>] ? restore_altstack+0x24/0x40
+ [<ffffffff83003286>] exit_to_usermode_loop+0x76/0xb0
+ [<ffffffff83003af0>] prepare_exit_to_usermode+0x40/0x50
+ [<ffffffff8381c5af>] retint_user+0x8/0x10

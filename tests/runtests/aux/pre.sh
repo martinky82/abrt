@@ -4,31 +4,39 @@ export > $OUTPUT_ROOT/pre/envs.log
 cp /var/log/messages $OUTPUT_ROOT/pre/messages
 dmesg -c > $OUTPUT_ROOT/pre/dmesg_pre
 
-yum clean metadata
+dnf clean metadata
 
-#yum install -y beakerlib dejagnu time createrepo mock expect
+#dnf install -y beakerlib dejagnu time createrepo mock expect
 if [ "${REINSTALL_PRE}" = "1" ]; then
     echo 'REINSTALL_PRE set'
 
-    rpm -qa abrt\* libreport\* satyr\* will-crash\* \
+    rpm -qa abrt\* libreport\* python3-abrt\* satyr\* will-crash\* \
         | xargs rpm -e --nodeps
 
+    # If there is still something installed that is in PACKAGES, this will
+    # leave those packages broken, and you will find yourself scratching your
+    # head, as “dnf install” does not reinstall.
     rm -rf /etc/abrt/
     rm -rf /etc/libreport/
 
-    yum -y install $PACKAGES
+    dnf -y install $PACKAGES
 fi
 
 cat > /etc/libreport/events.d/test_event.conf << _EOF_
 EVENT=notify
+        echo "ABRT tests - EVENT=notify - $DUMP_DIR"
         touch /tmp/abrt-done
+        true
 EVENT=notify-dup
+        echo "ABRT tests - EVENT=notify-dup - $DUMP_DIR"
         touch /tmp/abrt-done
+        true
 _EOF_
 
+augtool set /files/etc/abrt/abrt.conf/MaxCrashReportsSize 1000
+
 if [ "${DISABLE_GPGCHECK}" = "1" ]; then
-    sed -i 's/OpenGPGCheck.*=.*yes/OpenGPGCheck = no/' \
-        /etc/abrt/abrt-action-save-package-data.conf
+    augtool set /files/etc/abrt/abrt-action-save-package-data.conf/OpenGPGCheck no
 fi
 
 if [ "${DISABLE_AUTOREPORTING}" = "1" ]; then
@@ -46,12 +54,12 @@ fi
 
 if [ "${UPDATE_PACKAGES}" = "1" ]; then
     echo 'UPDATE_PACKAGES set'
-    yum -y update $PACKAGES
+    dnf -y update $PACKAGES
 fi
 
 if [ "${UPDATE_SYSTEM}" = "1" ]; then
     echo 'UPDATE_SYSTEM set'
-    yum -y update
+    dnf -y update
 fi
 
 if [ "${DISABLE_NOAUDIT}" = "1" ]; then

@@ -43,6 +43,8 @@ rlJournalStart
         TmpDir=$(mktemp -d)
         cp verify_core_backtrace.py verify_core_backtrace_length.py will_segfault_in_new_pid.c will_segfault_locked_memory.c $TmpDir
         pushd $TmpDir
+
+        rlRun "augtool set /files/etc/abrt/abrt-action-save-package-data.conf/ProcessUnpackaged yes"
     rlPhaseEnd
 
     rlPhaseStartTest "CCpp plugin (testuser crash)"
@@ -67,7 +69,7 @@ rlJournalStart
     rlPhaseEnd
 
     rlPhaseStartCleanup
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
         rlRun "userdel -r -f testuser" 0
     rlPhaseEnd
 
@@ -85,7 +87,7 @@ rlJournalStart
     rlPhaseEnd
 
     rlPhaseStartCleanup
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
     rlPhaseEnd
 
     rlPhaseStartTest "auto-load GDB script from /var/cache/abrt-di/"
@@ -112,7 +114,7 @@ EOF
 
         rlRun "rm /var/cache/abrt-di/usr/lib/debug/usr/bin/will_segfault-gdb.py"
 
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
     rlPhaseEnd
 
     rlPhaseStartTest "crash in a non-init PID NS"
@@ -126,8 +128,6 @@ EOF
         wait_for_hooks
         get_crash_path
 
-        rlRun "killall abrt-hook-ccpp" 1 "Kill hung abrt-hook-ccpp process"
-
         rlAssertExists "$crash_PATH/coredump"
         rlAssertExists "$crash_PATH/global_pid"
         rlAssertNotEquals "Global PID is sane" "_1" "_$(cat $crash_PATH/global_pid)"
@@ -135,7 +135,7 @@ EOF
         rlAssertGrep "Name:[[:space:]]*will_segfault" $crash_PATH/proc_pid_status
         rlAssertGrep "will_segfault" $crash_PATH/cmdline
 
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
     rlPhaseEnd
 
     rlPhaseStartTest "crash of a process with locked memory"
@@ -153,7 +153,23 @@ EOF
         rlAssertEquals "Detected the right process" "_./$EXECUTABLE" "_$(cat $crash_PATH/cmdline)"
         rlRun "grep VmLck $crash_PATH/proc_pid_status"
 
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
+    rlPhaseEnd
+
+    rlPhaseStartTest "crash of a process with white space in its name"
+        EXECUTABLE="white spaced name"
+        rlRun "cp `which will_segfault` \"$EXECUTABLE\""
+
+        prepare
+        rlRun "./\"$EXECUTABLE\"" 139
+        wait_for_hooks
+        get_crash_path
+
+        rlAssertEquals "Correct cmdline" "_'./$EXECUTABLE'" "_$(cat $crash_PATH/cmdline)"
+        rlAssertEquals "Correct executable" "_$(pwd)/$EXECUTABLE" "_$(cat $crash_PATH/executable)"
+        rlAssertEquals "Correct reason" "_$EXECUTABLE killed by SIGSEGV" "_$(cat $crash_PATH/reason)"
+
+        remove_problem_directory
     rlPhaseEnd
 
     rlPhaseStartCleanup
@@ -161,6 +177,7 @@ EOF
         rlBundleLogs abrt $(echo *_ls) $(echo verify_result*)
         popd # TmpDir
         rm -rf $TmpDir
+        rlRun "augtool set /files/etc/abrt/abrt-action-save-package-data.conf/ProcessUnpackaged no"
     rlPhaseEnd
     rlJournalPrintText
 rlJournalEnd

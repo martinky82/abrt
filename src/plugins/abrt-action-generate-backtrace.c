@@ -51,57 +51,53 @@ int main(int argc, char **argv)
     };
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_STRING( 'd', NULL, &dump_dir_name   , "DIR"           , _("Problem directory")),
         OPT_STRING( 'i', NULL, &i_opt           , "DIR1[:DIR2]...", _("Additional debuginfo directories")),
         OPT_INTEGER('t', NULL, &exec_timeout_sec,                   _("Kill gdb if it runs for more than NUM seconds")),
         OPT_END()
     };
-    /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
+    /*unsigned opts =*/ libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
-    map_string_t *settings = new_map_string();
-    if (!load_abrt_plugin_conf_file(CCPP_CONF, settings))
+    g_autoptr(GHashTable) settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    if (!abrt_load_abrt_plugin_conf_file(CCPP_CONF, settings))
         error_msg("Can't load '%s'", CCPP_CONF);
 
-    const char *value = get_map_string_item_or_NULL(settings, "DebuginfoLocation");
-    char *debuginfo_location;
+    const char *value = g_hash_table_lookup(settings, "DebuginfoLocation");
+    g_autofree char *debuginfo_location = NULL;
     if (value)
-        debuginfo_location = xstrdup(value);
+        debuginfo_location = g_strdup(value);
     else
-        debuginfo_location = xstrdup(LOCALSTATEDIR"/cache/abrt-di");
+        debuginfo_location = g_strdup(LOCALSTATEDIR"/cache/abrt-di");
 
-    free_map_string(settings);
-    char *debuginfo_dirs = NULL;
+    g_autofree char *debuginfo_dirs = NULL;
     if (i_opt)
-        debuginfo_dirs = xasprintf("%s:%s", debuginfo_location, i_opt);
+        debuginfo_dirs = g_strdup_printf("%s:%s", debuginfo_location, i_opt);
 
     /* Create gdb backtrace */
-    char *backtrace = get_backtrace(dump_dir_name, exec_timeout_sec,
-            (debuginfo_dirs) ? debuginfo_dirs : debuginfo_location);
-    free(debuginfo_location);
-    if (!backtrace)
-    {
-        backtrace = xstrdup("");
-        log("get_backtrace() returns NULL, broken core/gdb?");
-    }
-    free(debuginfo_dirs);
-    free_abrt_conf_data();
-
-    /* Store gdb backtrace */
-
     struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
     if (!dd)
         return 1;
+    g_autofree char *backtrace = abrt_get_backtrace(dd, exec_timeout_sec,
+            (debuginfo_dirs) ? debuginfo_dirs : debuginfo_location);
+    if (!backtrace)
+    {
+        backtrace = g_strdup("");
+        log_warning("abrt_get_backtrace() returns NULL, broken core/gdb?");
+    }
+    abrt_free_abrt_conf_data();
+
+    /* Store gdb backtrace */
+
     dd_save_text(dd, FILENAME_BACKTRACE, backtrace);
     dd_close(dd);
 
     /* Don't be completely silent. gdb run takes a few seconds,
      * it is useful to let user know it (maybe) worked.
      */
-    log(_("Backtrace is generated and saved, %u bytes"), (int)strlen(backtrace));
-    free(backtrace);
+    log_warning(_("Backtrace is generated and saved, %u bytes"), (int)strlen(backtrace));
 
     return 0;
 }

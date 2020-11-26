@@ -18,7 +18,7 @@
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 
-#define EXAMPLE_PFX "../../../examples"
+#define EXAMPLE_PFX "../../examples"
 
 struct test_struct {
         const char *filename;
@@ -41,7 +41,7 @@ static inline char *fread_full(const char *filenamep)
         fseek(fp, 0, SEEK_END);
         off_t size = ftell(fp);
         fseek(fp, 0, SEEK_SET);
-        char *koops_bt = xzalloc(size + 1);
+        char *koops_bt = g_malloc0(size + 1);
         int r = fread(koops_bt, sizeof(char), size, fp);
         fclose(fp);
         if (r < 0)

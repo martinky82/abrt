@@ -1,12 +1,13 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Single purpose HTTP server
 # - accepts POST of ureport JSON and dumps it to a file
 
 import sys
 import json
-import BaseHTTPServer, cgi
+import cgi
+import http.server
 
-class Handler(BaseHTTPServer.BaseHTTPRequestHandler):
+class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         # parse form data
         form = cgi.FieldStorage(
@@ -57,11 +58,16 @@ class Handler(BaseHTTPServer.BaseHTTPRequestHandler):
                 fh.write('{"invalid_request_path": "%s"}' % self.path)
             return
 
-        json.dump(response, self.wfile, indent=2)
+        self.wfile.write(json.dumps(response, indent=2).encode('utf-8'))
+
+    def log_message(self, format, *args):
+        super(Handler, self).log_message(format, *args)
+
+        sys.stderr.flush()
 
 PORT = 12345
-print "Serving at port", PORT
+print("Serving at port", PORT)
 
 Handler.save_ureport = sys.argv[1] if len(sys.argv) > 1 else 'ureport.json'
-httpd = BaseHTTPServer.HTTPServer(("", PORT), Handler)
+httpd = http.server.HTTPServer(("", PORT), Handler)
 httpd.serve_forever()

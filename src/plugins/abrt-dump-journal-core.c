@@ -17,6 +17,10 @@
 
 #define ABRT_JOURNAL_WATCH_STATE_FILE VAR_STATE"/abrt-dump-journal-core.state"
 
+enum {
+    ABRT_CORE_PRINT_STDOUT = 1 << 0,
+};
+
 /*
  * A journal message is a set of key value pairs in the following format:
  *   FIELD_NAME=${binary data}
@@ -32,19 +36,20 @@ struct field_mapping {
     const char *name;
     const char *file;
 } fields [] = {
-    { .name = "COREDUMP_EXE",         .file = FILENAME_EXECUTABLE, },
-    { .name = "COREDUMP_CMDLINE",     .file = FILENAME_CMDLINE, },
-    { .name = "COREDUMP_PROC_STATUS", .file = FILENAME_PROC_PID_STATUS, },
-    { .name = "COREDUMP_PROC_MAPS",   .file = FILENAME_MAPS, },
-    { .name = "COREDUMP_PROC_LIMITS", .file = FILENAME_LIMITS, },
-    { .name = "COREDUMP_PROC_CGROUP", .file = FILENAME_CGROUP, },
-    { .name = "COREDUMP_ENVIRON",     .file = FILENAME_ENVIRON, },
-    { .name = "COREDUMP_CWD",         .file = FILENAME_PWD, },
-    { .name = "COREDUMP_ROOT",        .file = FILENAME_ROOTDIR, },
-    { .name = "COREDUMP_OPEN_FDS",    .file = FILENAME_OPEN_FDS, },
-    { .name = "COREDUMP_UID",         .file = FILENAME_UID, },
-    //{ .name = "COREDUMP_GID",         .file = FILENAME_GID, },
-    { .name = "COREDUMP_PID",         .file = FILENAME_PID, },
+    { .name = "COREDUMP_EXE",               .file = FILENAME_EXECUTABLE, },
+    { .name = "COREDUMP_CMDLINE",           .file = FILENAME_CMDLINE, },
+    { .name = "COREDUMP_PROC_STATUS",       .file = FILENAME_PROC_PID_STATUS, },
+    { .name = "COREDUMP_PROC_MAPS",         .file = FILENAME_MAPS, },
+    { .name = "COREDUMP_PROC_LIMITS",       .file = FILENAME_LIMITS, },
+    { .name = "COREDUMP_PROC_CGROUP",       .file = FILENAME_CGROUP, },
+    { .name = "COREDUMP_ENVIRON",           .file = FILENAME_ENVIRON, },
+    { .name = "COREDUMP_CWD",               .file = FILENAME_PWD, },
+    { .name = "COREDUMP_ROOT",              .file = FILENAME_ROOTDIR, },
+    { .name = "COREDUMP_OPEN_FDS",          .file = FILENAME_OPEN_FDS, },
+    { .name = "COREDUMP_UID",               .file = FILENAME_UID, },
+    //{ .name = "COREDUMP_GID",               .file = FILENAME_GID, },
+    { .name = "COREDUMP_PID",               .file = FILENAME_PID, },
+    { .name = "COREDUMP_PROC_MOUNTINFO",    .file = FILENAME_MOUNTINFO, },
 };
 
 /*
@@ -71,6 +76,7 @@ struct crash_info
     char *ci_executable_path;          ///< /full/path/to/executable
     const char *ci_executable_name;    ///< executable
     uid_t ci_uid;
+    pid_t ci_pid;
 
     struct field_mapping *ci_mapping;
     size_t ci_mapping_items;
@@ -83,6 +89,7 @@ typedef struct
 {
     const char *awc_dump_location;
     int awc_throttle;
+    int awc_run_flags;
 }
 abrt_watch_core_conf_t;
 
@@ -99,7 +106,7 @@ struct occurrence_queue
     int oq_head;       ///< the first empty index
     unsigned oq_size;  ///< size of the queue
 
-    struct last_occurence
+    struct last_occurrence
     {
         unsigned oqlc_stamp;
         char *oqlc_executable;
@@ -159,7 +166,7 @@ abrt_journal_update_occurrence(const char *executable, unsigned ts)
 
     s_queue.oq_occurrences[s_queue.oq_head].oqlc_stamp = ts;
     free(s_queue.oq_occurrences[s_queue.oq_head].oqlc_executable);
-    s_queue.oq_occurrences[s_queue.oq_head].oqlc_executable = xstrdup(executable);
+    s_queue.oq_occurrences[s_queue.oq_head].oqlc_executable = g_strdup(executable);
 
     if (++s_queue.oq_head >= s_queue.oq_size)
         s_queue.oq_head = 0;
@@ -183,7 +190,7 @@ abrt_journal_update_occurrence(const char *executable, unsigned ts)
 static int
 abrt_journal_core_retrieve_information(abrt_journal_t *journal, struct crash_info *info)
 {
-    if (abrt_journal_get_int_field(journal, "COREDUMP_SIGNAL", &(info->ci_signal_no)) != 0)
+    if (!abrt_journal_get_int(journal, "COREDUMP_SIGNAL", &info->ci_signal_no) != 0)
     {
         log_info("Failed to get signal number from journal message");
         return -EINVAL;
@@ -213,10 +220,17 @@ abrt_journal_core_retrieve_information(abrt_journal_t *journal, struct crash_inf
         return 1;
     }
 
-    if (abrt_journal_get_unsigned_field(journal, "COREDUMP_UID", &(info->ci_uid)))
+    if (!abrt_journal_get_uid(journal, "COREDUMP_UID", &info->ci_uid))
     {
         log_info("Failed to get UID from journal message");
         return -EINVAL;
+    }
+
+    /* This is not fatal, the pid is used only in dumpdir name */
+    if (!abrt_journal_get_pid(journal, "COREDUMP_PID", &info->ci_pid))
+    {
+        log_notice("Failed to get PID from journal message.");
+        info->ci_pid = getpid();
     }
 
     char *proc_status = abrt_journal_get_string_field(journal, "COREDUMP_PROC_STATUS", NULL);
@@ -226,11 +240,11 @@ abrt_journal_core_retrieve_information(abrt_journal_t *journal, struct crash_inf
         return -ENOENT;
     }
 
-    uid_t tmp_fsuid = get_fsuid(proc_status);
+    int tmp_fsuid = libreport_get_fsuid(proc_status);
     if (tmp_fsuid < 0)
         return -EINVAL;
 
-    if (tmp_fsuid != info->ci_uid)
+    if ((uid_t)tmp_fsuid != info->ci_uid)
     {
         /* use root for suided apps unless it's explicitly set to UNSAFE */
         info->ci_uid = (dump_suid_policy() != DUMP_SUID_UNSAFE) ? 0 : tmp_fsuid;
@@ -246,40 +260,69 @@ abrt_journal_core_retrieve_information(abrt_journal_t *journal, struct crash_inf
 static int
 save_systemd_coredump_in_dump_directory(struct dump_dir *dd, struct crash_info *info)
 {
-    char coredump_path[PATH_MAX + 1];
+    char coredump_path[PATH_MAX + 1] = { '\0' };
     if (coredump_path != abrt_journal_get_string_field(info->ci_journal, "COREDUMP_FILENAME", coredump_path))
-    {
-        log_info("Ignoring coredumpctl entry becuase it misses coredump file");
-        return -1;
-    }
+        log_debug("Processing coredumpctl entry without a real file");
 
-    const size_t len = strlen(coredump_path);
-    if (   len >= 3
-        && coredump_path[len - 3] == '.' && coredump_path[len - 2] == 'x' && coredump_path[len - 1] == 'z')
+    if (g_str_has_suffix(coredump_path, ".lz4") ||
+        g_str_has_suffix(coredump_path, ".xz") ||
+        g_str_has_suffix(coredump_path, ".zst"))
     {
         if (dd_copy_file_unpack(dd, FILENAME_COREDUMP, coredump_path))
             return -1;
     }
-    else if (dd_copy_file(dd, FILENAME_COREDUMP, coredump_path))
-        return -1;
+    else if (strlen(coredump_path) > 0)
+    {
+        if (dd_copy_file(dd, FILENAME_COREDUMP, coredump_path))
+            return -1;
+    }
+    else
+    {
+        const char *data = NULL;
+        size_t data_len = 0;
+        int r = abrt_journal_get_field(info->ci_journal, "COREDUMP", (const void **)&data, &data_len);
+        if (r < 0)
+        {
+            log_info("Ignoring coredumpctl entry without core dump file.");
+            return -1;
+        }
+
+        dd_save_binary(dd, FILENAME_COREDUMP, data, data_len);
+    }
 
     dd_save_text(dd, FILENAME_ABRT_VERSION, VERSION);
     dd_save_text(dd, FILENAME_TYPE, "CCpp");
     dd_save_text(dd, FILENAME_ANALYZER, "abrt-journal-core");
 
-    char *reason;
-    if (info->ci_signal_name != NULL)
-        reason = xasprintf("%s killed by signal %d", info->ci_executable_name, info->ci_signal_no);
+    g_autofree char *reason = NULL;
+    if (info->ci_signal_name == NULL)
+        reason = g_strdup_printf("%s killed by signal %d", info->ci_executable_name, info->ci_signal_no);
     else
-        reason = xasprintf("%s killed by SIG%s", info->ci_executable_name, info->ci_signal_name);
+        reason = g_strdup_printf("%s killed by SIG%s", info->ci_executable_name, info->ci_signal_name);
 
     dd_save_text(dd, FILENAME_REASON, reason);
-    free(reason);
 
-    char *cursor = NULL;
+    g_autofree char *cursor = NULL;
     if (abrt_journal_get_cursor(info->ci_journal, &cursor) == 0)
         dd_save_text(dd, "journald_cursor", cursor);
-    free(cursor);
+
+    const char *data = NULL;
+    size_t data_len = 0;
+
+    /* This journal field is not present most of the time, because it is
+     * created only for coredumps from processes running in a container.
+     *
+     * Printing out the log message would be confusing hence.
+     *
+     * If we find more similar fields, we should not add more if statements
+     * but encode this in the struct field_mapping.
+     *
+     * For now, it would be just vasting of memory and time.
+     */
+    if (!abrt_journal_get_field(info->ci_journal, "COREDUMP_CONTAINER_CMDLINE", (const void **)&data, &data_len))
+    {
+        dd_save_binary(dd, FILENAME_CONTAINER_CMDLINE, data, data_len);
+    }
 
     for (size_t i = 0; i < info->ci_mapping_items; ++i)
     {
@@ -302,26 +345,39 @@ save_systemd_coredump_in_dump_directory(struct dump_dir *dd, struct crash_info *
 static int
 abrt_journal_core_to_abrt_problem(struct crash_info *info, const char *dump_location)
 {
-    struct dump_dir *dd = create_dump_dir(dump_location, "ccpp", /*fs owner*/0,
+    struct dump_dir *dd = create_dump_dir_ext(dump_location, "ccpp", info->ci_pid, /*fs owner*/0,
             (save_data_call_back)save_systemd_coredump_in_dump_directory, info);
 
     if (dd != NULL)
     {
-        char *path = xstrdup(dd->dd_dirname);
+        g_autofree char *path = g_strdup(dd->dd_dirname);
         dd_close(dd);
-        notify_new_path(path);
+        abrt_notify_new_path(path);
         log_debug("ABRT daemon has been notified about directory: '%s'", path);
-        free(path);
     }
 
     return dd == NULL;
 }
 
 /*
+ * Prints a core info to stdout.
+ */
+static int
+abrt_journal_core_to_stdout(struct crash_info *info)
+{
+    printf(_("UID=%9i; SIG=%2i (%4s); EXE=%s\n"),
+           info->ci_uid,
+           info->ci_signal_no,
+           info->ci_signal_name,
+           info->ci_executable_path);
+    return 0;
+}
+
+/*
  * Creates an abrt problem from a journal message
  */
 static int
-abrt_journal_dump_core(abrt_journal_t *journal, const char *dump_location)
+abrt_journal_dump_core(abrt_journal_t *journal, const char *dump_location, int run_flags)
 {
     struct crash_info info = { 0 };
     info.ci_journal = journal;
@@ -343,7 +399,10 @@ abrt_journal_dump_core(abrt_journal_t *journal, const char *dump_location)
         goto dump_cleanup;
     }
 
-    r = abrt_journal_core_to_abrt_problem(&info, dump_location);
+    if ((run_flags & ABRT_CORE_PRINT_STDOUT))
+        r = abrt_journal_core_to_stdout(&info);
+    else
+        r = abrt_journal_core_to_abrt_problem(&info, dump_location);
 
 dump_cleanup:
     if (info.ci_executable_path != NULL)
@@ -388,7 +447,7 @@ abrt_journal_watch_cores(abrt_journal_watch_t *watch, void *user_data)
     {
         error_msg("BUG: current time stamp lower than an old one");
 
-        if (g_verbose > 2)
+        if (libreport_g_verbose > 2)
             abort();
 
         goto watch_cleanup;
@@ -402,10 +461,21 @@ abrt_journal_watch_cores(abrt_journal_watch_t *watch, void *user_data)
         goto watch_cleanup;
     }
 
-    if (abrt_journal_core_to_abrt_problem(&info, conf->awc_dump_location))
+    if ((conf->awc_run_flags & ABRT_CORE_PRINT_STDOUT))
     {
-        error_msg(_("Failed to save detect problem data in abrt database"));
-        goto watch_cleanup;
+        if (abrt_journal_core_to_stdout(&info))
+        {
+            error_msg(_("Failed to print detect problem data to stdout"));
+            goto watch_cleanup;
+        }
+    }
+    else
+    {
+        if (abrt_journal_core_to_abrt_problem(&info, conf->awc_dump_location))
+        {
+            error_msg(_("Failed to save detect problem data in abrt database"));
+            goto watch_cleanup;
+        }
     }
 
     abrt_journal_update_occurrence(info.ci_executable_path, current);
@@ -465,15 +535,20 @@ main(int argc, char *argv[])
         OPT_t = 1 << 6,
         OPT_T = 1 << 7,
         OPT_f = 1 << 8,
+        OPT_a = 1 << 9,
+        OPT_J = 1 << 10,
+        OPT_o = 1 << 11,
     };
 
     char *cursor = NULL;
     char *dump_location = NULL;
+    char *journal_dir = NULL;
     int throttle = 0;
+    int run_flags = 0;
 
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_BOOL(  's', NULL, NULL, _("Log to syslog")),
         OPT_STRING('d', NULL, &dump_location, "DIR", _("Create new problem directory in DIR for every coredump")),
         OPT_BOOL(  'D', NULL, NULL, _("Same as -d DumpLocation, DumpLocation is specified in abrt.conf")),
@@ -482,47 +557,50 @@ main(int argc, char *argv[])
         OPT_INTEGER('t', NULL, &throttle, _("Throttle problem directory creation to 1 per INT second")),
         OPT_BOOL(  'T', NULL, NULL, _("Same as -t INT, INT is specified in plugins/CCpp.conf")),
         OPT_BOOL(  'f', NULL, NULL, _("Follow systemd-journal from the last seen position (if available)")),
+        OPT_BOOL(  'a', NULL, NULL, _("Read journal files from all machines")),
+        OPT_STRING('J', NULL, &journal_dir,  "PATH", _("Read all journal files from directory at PATH")),
+        OPT_BOOL(  'o', NULL, NULL, _("Print found oopses on standard output")),
         OPT_END()
     };
-    unsigned opts = parse_opts(argc, argv, program_options, program_usage_string);
+    unsigned opts = libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
     if ((opts & OPT_s) || getenv("ABRT_SYSLOG"))
-        logmode = LOGMODE_JOURNAL;
+        libreport_logmode = LOGMODE_JOURNAL;
 
     if ((opts & OPT_c) && (opts & OPT_e))
         error_msg_and_die(_("You need to specify either -c CURSOR or -e"));
 
     /* Initialize ABRT configuration */
-    load_abrt_conf();
+    abrt_load_abrt_conf();
+
+    if ((opts & OPT_o))
+        run_flags |= ABRT_CORE_PRINT_STDOUT;
 
     if (opts & OPT_D)
     {
         if (opts & OPT_d)
-            show_usage_and_die(program_usage_string, program_options);
-        dump_location = g_settings_dump_location;
+            libreport_show_usage_and_die(program_usage_string, program_options);
+        dump_location = abrt_g_settings_dump_location;
     }
 
     {   /* Load CCpp.conf */
-        map_string_t *settings = new_map_string();
-        load_abrt_plugin_conf_file("CCpp.conf", settings);
+        g_autoptr(GHashTable) settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+        abrt_load_abrt_plugin_conf_file("CCpp.conf", settings);
         const char *value;
 
-        /* The following commented out lines are not supported by
-         * abrt-dump-journal-core but are supported by abrt-hook-ccpp */
-        //value = get_map_string_item_or_NULL(settings, "MakeCompatCore");
-        //setting_MakeCompatCore = value && string_to_bool(value);
-        //value = get_map_string_item_or_NULL(settings, "SaveBinaryImage");
-        //setting_SaveBinaryImage = value && string_to_bool(value);
-        //value = get_map_string_item_or_NULL(settings, "SaveFullCore");
-        //setting_SaveFullCore = value ? string_to_bool(value) : true;
-
-        value = get_map_string_item_or_NULL(settings, "VerboseLog");
+        value = g_hash_table_lookup(settings, "VerboseLog");
         if (value)
-            g_verbose = xatoi_positive(value);
+        {
+            char *endptr;
 
-        free_map_string(settings);
+            long verbose = g_ascii_strtoull(value, &endptr, 10);
+            if (verbose >= 0 && verbose <= UINT_MAX && value != endptr)
+                libreport_g_verbose = (unsigned)verbose;
+            else
+                error_msg_and_die("expected number in range <%d, %d>: '%s'", 0, UINT_MAX, value);
+        }
     }
 
     /* systemd-coredump creates journal messages with SYSLOG_IDENTIFIER equals
@@ -537,8 +615,18 @@ main(int argc, char *argv[])
            (env_journal_filter ? (gpointer)env_journal_filter : (gpointer)"SYSLOG_IDENTIFIER=systemd-coredump"));
 
     abrt_journal_t *journal = NULL;
-    if (abrt_journal_new(&journal))
-        error_msg_and_die(_("Cannot open systemd-journal"));
+    if ((opts & OPT_J))
+    {
+        log_debug("Using journal files from directory '%s'", journal_dir);
+
+        if (abrt_journal_open_directory(&journal, journal_dir))
+            error_msg_and_die(_("Cannot initialize systemd-journal in directory '%s'"), journal_dir);
+    }
+    else
+    {
+        if (((opts & OPT_a) ? abrt_journal_new_merged : abrt_journal_new)(&journal))
+            error_msg_and_die(_("Cannot open systemd-journal"));
+    }
 
     if (abrt_journal_set_journal_filter(journal, coredump_journal_filter) < 0)
         error_msg_and_die(_("Cannot filter systemd-journal to systemd-coredump data only"));
@@ -564,6 +652,7 @@ main(int argc, char *argv[])
         abrt_watch_core_conf_t conf = {
             .awc_dump_location = dump_location,
             .awc_throttle = throttle,
+            .awc_run_flags = run_flags,
         };
 
         watch_journald(journal, &conf);
@@ -571,10 +660,10 @@ main(int argc, char *argv[])
         abrt_journal_save_current_position(journal, ABRT_JOURNAL_WATCH_STATE_FILE);
     }
     else
-        abrt_journal_dump_core(journal, dump_location);
+        abrt_journal_dump_core(journal, dump_location, run_flags);
 
     abrt_journal_free(journal);
-    free_abrt_conf_data();
+    abrt_free_abrt_conf_data();
 
     return EXIT_SUCCESS;
 }

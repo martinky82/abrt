@@ -13,9 +13,16 @@
  * GNU General Public License for more details.
  */
 #include <satyr/stacktrace.h>
+#include <satyr/koops/stacktrace.h>
+#include <satyr/thread.h>
+#include <satyr/koops/frame.h>
+#include <satyr/frame.h>
+#include <satyr/normalize.h>
 
 #include "oops-utils.h"
 #include "libabrt.h"
+
+int g_abrt_oops_sleep_woke_up_on_signal;
 
 int abrt_oops_process_list(GList *oops_list, const char *dump_location, const char *analyzer, int flags)
 {
@@ -24,27 +31,26 @@ int abrt_oops_process_list(GList *oops_list, const char *dump_location, const ch
     int oops_cnt = g_list_length(oops_list);
     if (oops_cnt != 0)
     {
-        log("Found oopses: %d", oops_cnt);
+        log_warning("Found oopses: %d", oops_cnt);
         if ((flags & ABRT_OOPS_PRINT_STDOUT))
         {
             int i = 0;
             while (i < oops_cnt)
             {
                 char *kernel_bt = (char*)g_list_nth_data(oops_list, i++);
-                char *tainted_short = kernel_tainted_short(kernel_bt);
+                g_autofree char *tainted_short = abrt_kernel_tainted_short(kernel_bt);
                 if (tainted_short)
-                    log("Kernel is tainted '%s'", tainted_short);
+                    log_warning("Kernel is tainted '%s'", tainted_short);
 
-                free(tainted_short);
                 printf("\nVersion: %s", kernel_bt);
             }
         }
         if (dump_location != NULL)
         {
-            log("Creating problem directories");
+            log_warning("Creating problem directories");
             errors = abrt_oops_create_dump_dirs(oops_list, dump_location, analyzer, flags);
             if (errors)
-                log("%d errors while dumping oopses", errors);
+                log_warning("%d errors while dumping oopses", errors);
             /*
              * This marker in syslog file prevents us from
              * re-parsing old oopses. The only problem is that we
@@ -70,7 +76,7 @@ int abrt_oops_process_list(GList *oops_list, const char *dump_location, const ch
         int n = unreported_cnt > 30 ? 30 : unreported_cnt;
         n = n * n;
         if (n > 9)
-            log(_("Sleeping for %d seconds"), n);
+            log_warning(_("Sleeping for %d seconds"), n);
         abrt_oops_signaled_sleep(n); /* max 15 mins */
     }
 
@@ -85,28 +91,33 @@ unsigned abrt_oops_create_dump_dirs(GList *oops_list, const char *dump_location,
 
     log_notice("Saving %u oopses as problem dirs", oops_cnt >= countdown ? countdown : oops_cnt);
 
-    char *cmdline_str = xmalloc_fopen_fgetline_fclose("/proc/cmdline");
-    char *fips_enabled = xmalloc_fopen_fgetline_fclose("/proc/sys/crypto/fips_enabled");
-    char *proc_modules = xmalloc_open_read_close("/proc/modules", /*maxsize:*/ NULL);
-    char *suspend_stats = xmalloc_open_read_close("/sys/kernel/debug/suspend_stats", /*maxsize:*/ NULL);
+    g_autofree char *cmdline_str = libreport_xmalloc_fopen_fgetline_fclose("/proc/cmdline");
+    g_autofree char *fips_enabled = libreport_xmalloc_fopen_fgetline_fclose("/proc/sys/crypto/fips_enabled");
+    g_autofree char *proc_modules = libreport_xmalloc_open_read_close("/proc/modules", /*maxsize:*/ NULL);
+    g_autofree char *suspend_stats = libreport_xmalloc_open_read_close("/sys/kernel/debug/suspend_stats", /*maxsize:*/ NULL);
 
     time_t t = time(NULL);
-    const char *iso_date = iso_date_string(&t);
+    const char *iso_date = libreport_iso_date_string(&t);
 
     pid_t my_pid = getpid();
     unsigned idx = 0;
     unsigned errors = 0;
-    while (idx < oops_cnt)
+    for (GList *oops = oops_list; oops != NULL; oops = oops->next, ++idx)
     {
         char base[sizeof("oops-YYYY-MM-DD-hh:mm:ss-%lu-%lu") + 2 * sizeof(long)*3];
         sprintf(base, "oops-%s-%lu-%lu", iso_date, (long)my_pid, (long)idx);
-        char *path = concat_path_file(dump_location, base);
+        g_autofree char *path = g_build_filename(dump_location ? dump_location : "", base, NULL);
 
-        struct dump_dir *dd = dd_create(path, /*fs owner*/0, DEFAULT_DUMP_DIR_MODE);
+        mode_t dump_dir_mode = DEFAULT_DUMP_DIR_MODE;
+        if (flags & ABRT_OOPS_WORLD_READABLE)
+            /* Allow world to read the problem directory (o+r). */
+            dump_dir_mode |= S_IROTH;
+
+        struct dump_dir *dd = dd_create(path, /*fs owner*/0, dump_dir_mode);
         if (dd)
         {
             dd_create_basic_files(dd, /*no uid*/(uid_t)-1L, NULL);
-            abrt_oops_save_data_in_dump_dir(dd, (char*)g_list_nth_data(oops_list, idx++), proc_modules);
+            abrt_oops_save_data_in_dump_dir(dd, (char *)oops->data, proc_modules);
             dd_save_text(dd, FILENAME_ABRT_VERSION, VERSION);
             dd_save_text(dd, FILENAME_ANALYZER, "abrt-oops");
             dd_save_text(dd, FILENAME_TYPE, "Kerneloops");
@@ -121,12 +132,10 @@ unsigned abrt_oops_create_dump_dirs(GList *oops_list, const char *dump_location,
             if ((flags & ABRT_OOPS_WORLD_READABLE))
                 dd_set_no_owner(dd);
             dd_close(dd);
-            notify_new_path(path);
+            abrt_notify_new_path(path);
         }
         else
             errors++;
-
-        free(path);
 
         if (--countdown == 0)
             break;
@@ -136,17 +145,12 @@ unsigned abrt_oops_create_dump_dirs(GList *oops_list, const char *dump_location,
                 break;
     }
 
-    free(cmdline_str);
-    free(proc_modules);
-    free(fips_enabled);
-    free(suspend_stats);
-
     return errors;
 }
 
 static char *abrt_oops_list_of_tainted_modules(const char *proc_modules)
 {
-    struct strbuf *result = strbuf_new();
+    GString *result = g_string_new(NULL);
 
     const char *p = proc_modules;
     for (;;)
@@ -162,7 +166,7 @@ static char *abrt_oops_list_of_tainted_modules(const char *proc_modules)
         {
             if ((unsigned)(toupper(*paren) - 'A') <= 'Z'-'A')
             {
-                strbuf_append_strf(result, result->len == 0 ? "%.*s" : ",%.*s",
+                g_string_append_printf(result, result->len == 0 ? "%.*s" : ",%.*s",
                         (int)(strchrnul(p,' ') - p), p
                 );
                 break;
@@ -178,21 +182,43 @@ static char *abrt_oops_list_of_tainted_modules(const char *proc_modules)
 
     if (result->len == 0)
     {
-        strbuf_free(result);
+        g_string_free(result, TRUE);
         return NULL;
     }
-    return strbuf_free_nobuf(result);
+    return g_string_free(result, FALSE);
 }
 
 void abrt_oops_save_data_in_dump_dir(struct dump_dir *dd, char *oops, const char *proc_modules)
 {
     char *first_line = oops;
     char *second_line = (char*)strchr(first_line, '\n'); /* never NULL */
+    assert(second_line != NULL);
     *second_line++ = '\0';
 
     if (first_line[0])
         dd_save_text(dd, FILENAME_KERNEL, first_line);
     dd_save_text(dd, FILENAME_BACKTRACE, second_line);
+
+    /* save crash_function into dumpdir */
+    g_autofree char *error_message = NULL;
+    struct sr_stacktrace *stacktrace = sr_stacktrace_parse(SR_REPORT_KERNELOOPS,
+                                                           (const char *)second_line, &error_message);
+
+    if (stacktrace)
+    {
+        sr_normalize_koops_stacktrace((struct sr_koops_stacktrace *)stacktrace);
+        /* stacktrace is the same as thread, there is no need to check return value */
+        struct sr_thread *thread = sr_stacktrace_find_crash_thread(stacktrace);
+        struct sr_koops_frame *frame = (struct sr_koops_frame *)sr_thread_frames(thread);
+        if (frame && frame->function_name)
+            dd_save_text(dd, FILENAME_CRASH_FUNCTION, frame->function_name);
+
+        sr_stacktrace_free(stacktrace);
+    }
+    else
+    {
+        error_msg("Can't parse stacktrace: %s", error_message);
+    }
 
     /* check if trace doesn't have line: 'Your BIOS is broken' */
     if (strstr(second_line, "Your BIOS is broken"))
@@ -206,52 +232,45 @@ void abrt_oops_save_data_in_dump_dir(struct dump_dir *dd, char *oops, const char
                   "therefore kernel maintainers are unable to fix this problem."));
     else
     {
-        char *tainted_short = kernel_tainted_short(second_line);
+        g_autofree char *tainted_short = abrt_kernel_tainted_short(second_line);
         if (tainted_short)
         {
             log_notice("Kernel is tainted '%s'", tainted_short);
             dd_save_text(dd, FILENAME_TAINTED_SHORT, tainted_short);
 
-            char *tnt_long = kernel_tainted_long(tainted_short);
+            g_autofree char *tnt_long = abrt_kernel_tainted_long(tainted_short);
             dd_save_text(dd, FILENAME_TAINTED_LONG, tnt_long);
-            free(tnt_long);
 
-            struct strbuf *reason = strbuf_new();
+            g_autoptr(GString) reason = g_string_new(NULL);
             const char *fmt = _("A kernel problem occurred, but your kernel has been "
-                    "tainted (flags:%s). Kernel maintainers are unable to "
-                    "diagnose tainted reports.");
-            strbuf_append_strf(reason, fmt, tainted_short);
+                    "tainted (flags:%s). Explanation:\n%s"
+                    "Kernel maintainers are unable to diagnose tainted reports.");
+            g_string_append_printf(reason, fmt, tainted_short, tnt_long);
 
-            char *modlist = !proc_modules ? NULL : abrt_oops_list_of_tainted_modules(proc_modules);
+            g_autofree char *modlist = !proc_modules ? NULL : abrt_oops_list_of_tainted_modules(proc_modules);
             if (modlist)
             {
-                strbuf_append_strf(reason, _(" Tainted modules: %s."), modlist);
-                free(modlist);
+                g_string_append_printf(reason, _(" Tainted modules: %s."), modlist);
             }
 
-            dd_save_text(dd, FILENAME_NOT_REPORTABLE, reason->buf);
-            strbuf_free(reason);
-            free(tainted_short);
+            dd_save_text(dd, FILENAME_NOT_REPORTABLE, reason->str);
         }
     }
 
     // TODO: add "Kernel oops: " prefix, so that all oopses have recognizable FILENAME_REASON?
     // kernel oops 1st line may look quite puzzling otherwise...
-    char *reason_pretty = NULL;
-    char *error = NULL;
+    g_autofree char *reason_pretty = NULL;
+    g_autofree char *error = NULL;
     struct sr_stacktrace *trace = sr_stacktrace_parse(SR_REPORT_KERNELOOPS, second_line, &error);
     if (trace)
     {
         reason_pretty = sr_stacktrace_get_reason(trace);
         sr_stacktrace_free(trace);
     }
-    else
-        free(error);
 
     if (reason_pretty)
     {
         dd_save_text(dd, FILENAME_REASON, reason_pretty);
-        free(reason_pretty);
     }
     else
         dd_save_text(dd, FILENAME_REASON, second_line);
@@ -274,17 +293,15 @@ int abrt_oops_signaled_sleep(int seconds)
 
 char *abrt_oops_string_filter_regex(void)
 {
-    map_string_t *settings = new_map_string();
+    g_autoptr(GHashTable) settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 
-    load_abrt_plugin_conf_file("oops.conf", settings);
+    abrt_load_abrt_plugin_conf_file("oops.conf", settings);
 
-    int only_fatal_mce = 1;
-    try_get_map_string_item_as_bool(settings, "OnlyFatalMCE", &only_fatal_mce);
-
-    free_map_string(settings);
+    int only_fatal_mce = 0;
+    libreport_try_get_map_string_item_as_bool(settings, "OnlyFatalMCE", &only_fatal_mce);
 
     if (only_fatal_mce)
-        return xstrdup("^Machine .*$");
+        return g_strdup("^Machine .*$");
 
     return NULL;
 }

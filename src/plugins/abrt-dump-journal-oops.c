@@ -31,7 +31,7 @@ static GList* abrt_journal_extract_kernel_oops(abrt_journal_t *journal)
 {
     size_t lines_info_count = 0;
     size_t lines_info_size = 32;
-    struct abrt_koops_line_info *lines_info = xmalloc(lines_info_size * sizeof(lines_info[0]));
+    struct abrt_koops_line_info *lines_info = g_malloc(lines_info_size * sizeof(lines_info[0]));
 
     do
     {
@@ -42,12 +42,12 @@ static GList* abrt_journal_extract_kernel_oops(abrt_journal_t *journal)
         if (lines_info_count == lines_info_size)
         {
             lines_info_size *= 2;
-            lines_info = xrealloc(lines_info, lines_info_size * sizeof(lines_info[0]));
+            lines_info = g_realloc(lines_info, lines_info_size * sizeof(lines_info[0]));
         }
 
         char *orig_line = line;
-        lines_info[lines_info_count].level = koops_line_skip_level((const char **)&line);
-        koops_line_skip_jiffies((const char **)&line);
+        lines_info[lines_info_count].level = abrt_koops_line_skip_level((const char **)&line);
+        abrt_koops_line_skip_jiffies((const char **)&line);
 
         memmove(orig_line, line, strlen(line) + 1);
 
@@ -59,7 +59,7 @@ static GList* abrt_journal_extract_kernel_oops(abrt_journal_t *journal)
             && abrt_journal_next(journal) > 0);
 
     GList *oops_list = NULL;
-    koops_extract_oopses_from_lines(&oops_list, lines_info, lines_info_count);
+    abrt_koops_extract_oopses_from_lines(&oops_list, lines_info, lines_info_count);
 
     log_debug("Extracted: %d oopses", g_list_length(oops_list));
 
@@ -118,9 +118,9 @@ static void abrt_journal_watch_extract_kernel_oops(abrt_journal_watch_t *watch, 
 
 static void watch_journald(abrt_journal_t *journal, const char *dump_location, int flags)
 {
-    GList *koops_strings = koops_suspicious_strings_list();
+    GList *koops_strings = abrt_koops_suspicious_strings_list();
 
-    char *oops_string_filter_regex = abrt_oops_string_filter_regex();
+    g_autofree char *oops_string_filter_regex = abrt_oops_string_filter_regex();
     if (oops_string_filter_regex)
     {
         regex_t filter_re;
@@ -146,8 +146,9 @@ static void watch_journald(abrt_journal_t *journal, const char *dump_location, i
         }
 
         regfree(&filter_re);
-        free(oops_string_filter_regex);
     }
+
+    GList *koops_strings_blacklist = abrt_koops_suspicious_strings_blacklist();
 
     struct watch_journald_settings watch_conf = {
         .dump_location = dump_location,
@@ -158,6 +159,7 @@ static void watch_journald(abrt_journal_t *journal, const char *dump_location, i
         .decorated_cb = abrt_journal_watch_extract_kernel_oops,
         .decorated_cb_data = &watch_conf,
         .strings = koops_strings,
+        .blacklisted_strings = koops_strings_blacklist,
     };
 
     abrt_journal_watch_t *watch = NULL;
@@ -215,7 +217,7 @@ int main(int argc, char *argv[])
 
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_BOOL(  's', NULL, NULL, _("Log to syslog")),
         OPT_BOOL(  'o', NULL, NULL, _("Print found oopses on standard output")),
         /* oopses don't contain any sensitive info, and even
@@ -232,14 +234,14 @@ int main(int argc, char *argv[])
         OPT_STRING('J', NULL, &journal_dir,  "PATH", _("Read all journal files from directory at PATH")),
         OPT_END()
     };
-    unsigned opts = parse_opts(argc, argv, program_options, program_usage_string);
+    unsigned opts = libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
-    msg_prefix = g_progname;
+    libreport_msg_prefix = libreport_g_progname;
     if ((opts & OPT_s) || getenv("ABRT_SYSLOG"))
     {
-        logmode = LOGMODE_JOURNAL;
+        libreport_logmode = LOGMODE_JOURNAL;
     }
 
     if ((opts & OPT_c) && (opts & OPT_e))
@@ -248,11 +250,11 @@ int main(int argc, char *argv[])
     if (opts & OPT_D)
     {
         if (opts & OPT_d)
-            show_usage_and_die(program_usage_string, program_options);
-        load_abrt_conf();
-        dump_location = g_settings_dump_location;
-        g_settings_dump_location = NULL;
-        free_abrt_conf_data();
+            libreport_show_usage_and_die(program_usage_string, program_options);
+        abrt_load_abrt_conf();
+        dump_location = abrt_g_settings_dump_location;
+        abrt_g_settings_dump_location = NULL;
+        abrt_free_abrt_conf_data();
     }
 
     int oops_utils_flags = 0;

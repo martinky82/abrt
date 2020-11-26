@@ -229,6 +229,7 @@ static int is_crash_a_dup(const char *dump_dir_name, void *param)
     type = dd_load_text(dd, FILENAME_TYPE);
     free(executable);
     executable = dd_load_text_ext(dd, FILENAME_EXECUTABLE, DD_FAIL_QUIETLY_ENOENT);
+    g_autofree char *container_id = dd_load_text_ext(dd, FILENAME_CONTAINER_ID, DD_FAIL_QUIETLY_ENOENT);
     dup_uuid_init(dd);
     dup_corebt_init(dd);
     dd_close(dd);
@@ -236,7 +237,7 @@ static int is_crash_a_dup(const char *dump_dir_name, void *param)
     /* dump_dir_name can be relative */
     dump_dir_name = realpath(dump_dir_name, NULL);
 
-    DIR *dir = opendir(g_settings_dump_location);
+    DIR *dir = opendir(abrt_g_settings_dump_location);
     if (dir == NULL)
         goto end;
 
@@ -245,7 +246,7 @@ static int is_crash_a_dup(const char *dump_dir_name, void *param)
     struct dirent *dent;
     while ((dent = readdir(dir)) != NULL && crash_dump_dup_name == NULL)
     {
-        if (dot_or_dotdot(dent->d_name))
+        if (libreport_dot_or_dotdot(dent->d_name))
             continue; /* skip "." and ".." */
         const char *ext = strrchr(dent->d_name, '.');
         if (ext && strcmp(ext, ".new") == 0)
@@ -253,10 +254,10 @@ static int is_crash_a_dup(const char *dump_dir_name, void *param)
 
         dd = NULL;
 
-        char *tmp_concat_path = concat_path_file(g_settings_dump_location, dent->d_name);
+        char *tmp_concat_path = g_build_filename(abrt_g_settings_dump_location, dent->d_name, NULL);
 
-        char *dump_dir_name2 = realpath(tmp_concat_path, NULL);
-        if (g_verbose > 1 && !dump_dir_name2)
+        g_autofree char *dump_dir_name2 = realpath(tmp_concat_path, NULL);
+        if (libreport_g_verbose > 1 && !dump_dir_name2)
             perror_msg("realpath(%s)", tmp_concat_path);
 
         free(tmp_concat_path);
@@ -264,19 +265,29 @@ static int is_crash_a_dup(const char *dump_dir_name, void *param)
         if (!dump_dir_name2)
             continue;
 
-        char *dd_uid = NULL, *dd_type = NULL;
-        char *dd_executable = NULL;
+        g_autofree char *dd_uid = NULL, *dd_type = NULL;
+        g_autofree char *dd_executable = NULL, *dd_container_id = NULL;
 
         if (strcmp(dump_dir_name, dump_dir_name2) == 0)
             goto next; /* we are never a dup of ourself */
 
-        int sv_logmode = logmode;
+        int sv_logmode = libreport_logmode;
         /* Silently ignore any error in the silent log level. */
-        logmode = g_verbose == 0 ? 0 : sv_logmode;
+        libreport_logmode = libreport_g_verbose == 0 ? 0 : sv_logmode;
         dd = dd_opendir(dump_dir_name2, /*flags:*/ DD_FAIL_QUIETLY_ENOENT | DD_OPEN_READONLY);
-        logmode = sv_logmode;
+        libreport_logmode = sv_logmode;
         if (!dd)
             goto next;
+
+        /* problems from different containers are not duplicates */
+        if (container_id != NULL)
+        {
+            dd_container_id = dd_load_text_ext(dd, FILENAME_CONTAINER_ID, DD_FAIL_QUIETLY_ENOENT);
+            if (dd_container_id != NULL && strcmp(container_id, dd_container_id) != 0)
+            {
+                goto next;
+            }
+        }
 
         /* crashes of different users are not considered duplicates */
         dd_uid = dd_load_text_ext(dd, FILENAME_UID, DD_FAIL_QUIETLY_ENOENT);
@@ -312,10 +323,7 @@ static int is_crash_a_dup(const char *dump_dir_name, void *param)
         }
 
 next:
-        free(dump_dir_name2);
         dd_close(dd);
-        free(dd_uid);
-        free(dd_type);
     }
     closedir(dir);
 
@@ -324,58 +332,13 @@ end:
     return retval;
 }
 
-static void create_lockfile(void)
-{
-    char pid_str[sizeof(long)*3 + 4];
-    sprintf(pid_str, "%lu", (long)getpid());
-    char *lock_filename = concat_path_file(g_settings_dump_location, "post-create.lock");
-
-    /* Someone else's post-create may take a long-ish time to finish.
-     * For example, I had a failing email sending there, it took
-     * a minute to time out.
-     * That's why timeout is large (100 seconds):
-     */
-    int count = 100;
-    while (1)
-    {
-        /* Return values:
-         * -1: error (in this case, errno is 0 if error message is already logged)
-         *  0: failed to lock (someone else has it locked)
-         *  1: success
-         */
-        int r = create_symlink_lockfile(lock_filename, pid_str);
-    if (r > 0)
-            break;
-    if (r < 0)
-            error_msg_and_die("Can't create '%s'", lock_filename);
-    if (--count == 0)
-        {
-            /* Someone else's post-create process is alive but stuck.
-             * Don't wait forever.
-             */
-            error_msg("Stale lock '%s', removing it", lock_filename);
-            xunlink(lock_filename);
-            break;
-        }
-        sleep(1);
-    }
-    free(lock_filename);
-}
-
-static void delete_lockfile(void)
-{
-    char *lock_filename = concat_path_file(g_settings_dump_location, "post-create.lock");
-    xunlink(lock_filename);
-    free(lock_filename);
-}
-
 static char *do_log(char *log_line, void *param)
 {
     /* We pipe output of events to our log.
      * Otherwise, errors on post-create result in
      * "Corrupted or bad dump DIR, deleting" without adequate explanation why.
      */
-    log("%s", log_line);
+    log_warning("%s", log_line);
     return log_line;
 }
 
@@ -399,25 +362,30 @@ int main(int argc, char **argv)
     int nice_incr = 0;
 
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_STRING('e', "event" , &event_name, "EVENT",  _("Run EVENT on DIR")),
         OPT_BOOL('i', "interactive" , &interactive, _("Communicate directly to the user")),
         OPT_INTEGER('n',     "nice" , &nice_incr,   _("Increment the nice value by INCREMENT")),
         OPT_END()
     };
 
-    parse_opts(argc, argv, program_options, program_usage_string);
+    libreport_parse_opts(argc, argv, program_options, program_usage_string);
     argv += optind;
     if (!*argv || !event_name)
-        show_usage_and_die(program_usage_string, program_options);
+        libreport_show_usage_and_die(program_usage_string, program_options);
 
-    load_abrt_conf();
+    abrt_load_abrt_conf();
 
     const char *const opt_env_nice = getenv("ABRT_EVENT_NICE");
     if (opt_env_nice != NULL && opt_env_nice[0] != '\0')
     {
         log_debug("Using ABRT_EVENT_NICE=%s to increment the nice value", opt_env_nice);
-        nice_incr = xatoi(opt_env_nice);
+        char *endptr = NULL;
+        long nice_incr_intermediate = g_ascii_strtoll(opt_env_nice, &endptr, 10);
+        if (nice_incr_intermediate >= INT_MIN && nice_incr_intermediate <= INT_MAX && opt_env_nice != endptr)
+            nice_incr = (int)nice_incr_intermediate;
+        else
+            error_msg_and_die("expected number in range <%d, %d>: '%s'", INT_MIN, INT_MAX, opt_env_nice);
     }
 
     if (nice_incr != 0)
@@ -429,10 +397,10 @@ int main(int argc, char **argv)
     }
 
     bool post_create = (strcmp(event_name, "post-create") == 0);
-    char *dump_dir_name = NULL;
+    g_autofree char *dump_dir_name = NULL;
     while (*argv)
     {
-        dump_dir_name = xstrdup(*argv++);
+        dump_dir_name = g_strdup(*argv++);
         int i = strlen(dump_dir_name);
         while (--i >= 0)
             if (dump_dir_name[i] != '/')
@@ -451,22 +419,9 @@ int main(int argc, char **argv)
             make_run_event_state_forwarding(run_state);
         run_state->logging_callback = do_log;
         if (post_create)
-        {
             run_state->post_run_callback = is_crash_a_dup;
-            /*
-             * The post-create event cannot be run concurrently for more problem
-             * directories. The problem is in searching for duplicates process
-             * in case when two concurrently processed directories are duplicates
-             * of each other. Both of the directories are marked as duplicates
-             * of each other and are deleted.
-             */
-            create_lockfile();
-        }
 
         int r = run_event_on_dir_name(run_state, dump_dir_name, event_name);
-
-        if (post_create)
-            delete_lockfile();
 
         const bool no_action_for_event = (r == 0 && run_state->children_count == 0);
 
@@ -498,7 +453,6 @@ int main(int argc, char **argv)
         if (r != 0)
             return r; /* yes */
 
-        free(dump_dir_name);
         dump_dir_name = NULL;
     }
 

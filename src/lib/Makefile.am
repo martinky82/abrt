@@ -1,4 +1,4 @@
-# libreport - the stuff shared among most of abrt (like xmalloc, logging)
+# libreport - the stuff shared among most of abrt (like libreport_xmalloc, logging)
 # libabrt_dbus - daemon, cli and applet use this
 # libabrt_web - for abrt-action-foo where foo deals with network/web/ftp/...
 lib_LTLIBRARIES = \
@@ -16,19 +16,17 @@ libabrt_la_SOURCES = \
     migrate_dirs.c \
     check_recent_crash_file.c \
     problem_api.c \
-    problem_api_dbus.c \
-    ignored_problems.c
+    problem_api_dbus.c
 
 libabrt_la_CPPFLAGS = \
     -I$(srcdir)/../include \
     -I$(srcdir)/../lib \
     -DVAR_RUN=\"$(VAR_RUN)\" \
     -DCONF_DIR=\"$(CONF_DIR)\" \
-    -DDEFAULT_CONF_DIR=\"$(DEFAULT_CONF_DIR)\" \
     -DPLUGINS_CONF_DIR=\"$(PLUGINS_CONF_DIR)\" \
-    -DDEFAULT_PLUGINS_CONF_DIR=\"$(DEFAULT_PLUGINS_CONF_DIR)\" \
     -DEVENTS_DIR=\"$(EVENTS_DIR)\" \
     -DDEFAULT_DUMP_LOCATION=\"$(DEFAULT_DUMP_LOCATION)\" \
+    -DGDB=\"$(GDB)\" \
     $(GLIB_CFLAGS) \
     $(LIBREPORT_CFLAGS) \
     $(GIO_CFLAGS) \

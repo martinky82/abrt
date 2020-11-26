@@ -24,6 +24,7 @@
 #include <satyr/core/stacktrace.h>
 #include <satyr/core/thread.h>
 #include <satyr/core/frame.h>
+#include <satyr/normalize.h>
 
 static void trim_unstrip_output(char *result, const char *unstrip_n_output)
 {
@@ -56,39 +57,60 @@ static void trim_unstrip_output(char *result, const char *unstrip_n_output)
     *dst = '\0';
 }
 
-static char *build_ids_from_core_backtrace(const char *dump_dir_name)
+static struct sr_core_thread *
+core_thread_from_core_stacktrace(struct sr_core_stacktrace *stacktrace)
 {
-    char *error = NULL;
-    char *core_backtrace_path = xasprintf("%s/"FILENAME_CORE_BACKTRACE, dump_dir_name);
-    char *json = xmalloc_open_read_close(core_backtrace_path, /*maxsize:*/ NULL);
-    free(core_backtrace_path);
-
-    if (!json)
+    struct sr_core_thread *thread = sr_core_stacktrace_find_crash_thread(stacktrace);
+    if (!thread)
+    {
+        log_info("Failed to find crash thread");
         return NULL;
+    }
 
-    struct sr_core_stacktrace *stacktrace = sr_core_stacktrace_from_json_text(json, &error);
-    free(json);
+    return thread;
+}
+
+static struct sr_core_stacktrace *
+core_stacktrace_from_core_json(char *core_backtrace)
+{
+    g_autofree char *error = NULL;
+    struct sr_core_stacktrace *stacktrace = sr_core_stacktrace_from_json_text(core_backtrace, &error);
     if (!stacktrace)
     {
         if (error)
         {
             log_info("Failed to parse core backtrace: %s", error);
-            free(error);
         }
         return NULL;
     }
 
-    struct sr_core_thread *thread = sr_core_stacktrace_find_crash_thread(stacktrace);
+    return stacktrace;
+}
+
+static char *build_ids_from_core_backtrace(const char *dump_dir_name)
+{
+    g_autofree char *core_backtrace_path = g_strdup_printf("%s/"FILENAME_CORE_BACKTRACE, dump_dir_name);
+    g_autofree char *json = libreport_xmalloc_open_read_close(core_backtrace_path, /*maxsize:*/ NULL);
+
+    if (!json)
+        return NULL;
+
+    struct sr_core_stacktrace *stacktrace = core_stacktrace_from_core_json(json);
+
+    if (!stacktrace)
+        return NULL;
+
+    struct sr_core_thread *thread = core_thread_from_core_stacktrace(stacktrace);
+
     if (!thread)
     {
-        log_info("Failed to find crash thread");
         sr_core_stacktrace_free(stacktrace);
         return NULL;
     }
 
     void *build_id_list = NULL;
 
-    struct strbuf *strbuf = strbuf_new();
+    GString *strbuf = g_string_new(NULL);
     for (struct sr_core_frame *frame = thread->frames;
          frame;
          frame = frame->next)
@@ -103,13 +125,13 @@ static char *build_ids_from_core_backtrace(const char *dump_dir_name)
         GList *next = g_list_next(iter);
         if (next == NULL || 0 != strcmp(iter->data, next->data))
         {
-            strbuf = strbuf_append_strf(strbuf, "%s\n", (char *)iter->data);
+            g_string_append_printf(strbuf, "%s\n", (char *)iter->data);
         }
     }
     g_list_free(build_id_list);
     sr_core_stacktrace_free(stacktrace);
 
-    return strbuf_free_nobuf(strbuf);
+    return g_string_free(strbuf, FALSE);
 }
 
 int main(int argc, char **argv)
@@ -137,20 +159,18 @@ int main(int argc, char **argv)
     };
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_STRING('d', NULL, &dump_dir_name, "DIR", _("Problem directory")),
         OPT_END()
     };
-    /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
+    /*unsigned opts =*/ libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
     char *unstrip_n_output = NULL;
-    char *coredump_path = xasprintf("%s/"FILENAME_COREDUMP, dump_dir_name);
+    g_autofree char *coredump_path = g_strdup_printf("%s/"FILENAME_COREDUMP, dump_dir_name);
     if (access(coredump_path, R_OK) == 0)
-        unstrip_n_output = run_unstrip_n(dump_dir_name, /*timeout_sec:*/ 30);
-
-    free(coredump_path);
+        unstrip_n_output = abrt_run_unstrip_n(dump_dir_name, /*timeout_sec:*/ 30);
 
     if (unstrip_n_output)
     {
@@ -196,24 +216,58 @@ int main(int argc, char **argv)
         if (last_dot != first_dot)
         {
             /* There are more than one dot: "1.2.3"
-             * Strip last part, we don't want to distinquish crashes
+             * Strip last part, we don't want to distinguish crashes
              * in packages which differ only by minor release number.
              */
             *last_dot = '\0';
         }
     }
 
-    char *string_to_hash = xasprintf("%s%s%s", package, executable, unstrip_n_output);
+    char *string_to_hash = g_strdup_printf("%s%s%s", package, executable, unstrip_n_output);
     /*free(package);*/
     /*free(executable);*/
     /*free(unstrip_n_output);*/
 
     log_debug("String to hash: %s", string_to_hash);
 
-    char hash_str[SHA1_RESULT_LEN*2 + 1];
-    str_to_sha1str(hash_str, string_to_hash);
+    g_autofree char *checksum = NULL;
 
-    dd_save_text(dd, FILENAME_UUID, hash_str);
+    checksum = g_compute_checksum_for_string(G_CHECKSUM_SHA1, string_to_hash, -1);
+
+    dd_save_text(dd, FILENAME_UUID, checksum);
+
+    /* Create crash_function element from core_backtrace */
+    g_autofree char *core_backtrace_json = dd_load_text_ext(dd, FILENAME_CORE_BACKTRACE,
+                                                 DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE);
+    if (core_backtrace_json)
+    {
+        struct sr_core_stacktrace *stacktrace = core_stacktrace_from_core_json(core_backtrace_json);
+
+        if (!stacktrace)
+            goto next;
+
+        struct sr_core_thread *thread = core_thread_from_core_stacktrace(stacktrace);
+
+        if (!thread)
+            goto next;
+
+        sr_normalize_core_thread(thread);
+
+        struct sr_core_frame *frame = thread->frames;
+        if (!frame)
+        {
+            log_info("Could not find any usable stack frame");
+            goto next;
+        }
+
+        if (frame->function_name)
+            dd_save_text(dd, FILENAME_CRASH_FUNCTION, frame->function_name);
+
+next:
+        /* can be NULL */
+        sr_core_stacktrace_free(stacktrace);
+    }
+
     dd_close(dd);
 
     return 0;

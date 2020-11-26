@@ -31,37 +31,89 @@
 
 TEST="dumpdir_completedness"
 PACKAGE="abrt"
-DDFILES="abrt_version analyzer architecture cgroup cmdline component core_backtrace coredump count dso_list environ executable global_pid hostname kernel last_occurrence limits maps open_fds os_info os_release package pid pkg_arch pkg_epoch pkg_name pkg_release pkg_version proc_pid_status pwd reason runlevel time type uid username uuid var_log_messages"
+
+DDFILES="abrt_version analyzer architecture cmdline component count cpuinfo executable hostname kernel last_occurrence os_release package pkg_arch pkg_epoch pkg_name pkg_release pkg_version pkg_vendor pkg_fingerprint reason time type uid username uuid os_info runlevel"
+
+CCPP_FILES="core_backtrace coredump dso_list environ limits maps open_fds pid pwd cgroup global_pid  proc_pid_status"
+PYTHON_FILES="backtrace interpreter"
 
 rlJournalStart
     rlPhaseStartSetup
         check_prior_crashes
+        # rpm has to be installed
+        rlAssertRpm rpm-build
+        rlAssertRpm rpm
+        rlAssertRpm rpm-sign
+        rlAssertRpm gnupg2
 
         TmpDir=$(mktemp -d)
+        cp expect $TmpDir
+        cp -r Makefile my_crash.spec src $TmpDir
+        cp gpg_abrt_private.key gpg_abrt_public.key $TmpDir
+        cp mygpg $TmpDir
         pushd $TmpDir
+
+        rlRun "make rpm > rpmbuild.log"
+        CRASHING_RPM=$(grep "Wrote:" rpmbuild.log | grep -v debuginfo | grep -v src.rpm | sed 's/Wrote: //g')
+        rlRun "rm rpmbuild.log"
+
+        gpg --import --batch gpg_abrt_public.key gpg_abrt_private.key
+
+        killall -q gpg-agent
+        gpg-agent --homedir $HOME/.gnupg --allow-loopback --daemon
+
+        ./expect rpm --addsign -D "__gpg $(realpath mygpg)" -D "_gpg_name abrt_gpg_key" $CRASHING_RPM
+
+        # install signed rpm because if the rpm is unsigned
+        # pkg_fingerprint is not created
+        rlRun "rpm -Uvh --force $CRASHING_RPM"
     rlPhaseEnd
 
     rlPhaseStartTest "CCpp plugin"
         prepare
-        generate_crash
+
+        # crashing bin from my_crash package
+        ccpp_crash
+
         wait_for_hooks
         get_crash_path
 
         ls $crash_PATH > crash_dir_ls
         check_dump_dir_attributes $crash_PATH
 
-        for FILE in $DDFILES ; do
+        for FILE in $DDFILES $CCPP_FILES; do
             rlAssertExists "$crash_PATH/$FILE"
         done
 
-        rlAssertGrep "/bin/will_segfault" "$crash_PATH/core_backtrace"
+        rlAssertGrep "/usr/sbin/ccpp_crash" "$crash_PATH/core_backtrace"
 
-        rlRun "abrt-cli rm $crash_PATH"
+        remove_problem_directory
+    rlPhaseEnd
+
+    rlPhaseStartTest "Python3 plugin"
+        prepare
+
+        # crashing bin from my_crash package
+        python3_crash
+
+        wait_for_hooks
+        get_crash_path
+
+        ls $crash_PATH > crash_dir_ls
+        check_dump_dir_attributes $crash_PATH
+
+        for FILE in $DDFILES $PYTHON_FILES; do
+            rlAssertExists "$crash_PATH/$FILE"
+        done
+
+        remove_problem_directory
     rlPhaseEnd
 
     rlPhaseStartCleanup
+        rlRun "rpm -e my_crash"
         rlBundleLogs abrt $(echo *_ls)
         popd # TmpDir
+        ./expect gpg --delete-secret-and-public-key abrt_gpg_key
         rm -rf $TmpDir
     rlPhaseEnd
     rlJournalPrintText

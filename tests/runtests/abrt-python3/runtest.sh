@@ -44,11 +44,11 @@ rlJournalStart
     rlPhaseEnd
 
     rlPhaseStartTest monitor
-        python watch.py > watch_output &
+        python3 watch.py > watch_output &
 
         generate_crash
-        get_crash_path
         wait_for_hooks
+        get_crash_path
 
         # Give at leas 1s to D-Bus to deliver Crash signal to watch.py
         # It could be possible to configure dbus-monitor somehow but adding
@@ -59,25 +59,25 @@ rlJournalStart
         rlAssertNotDiffer watch_output watch_expected
         check_dump_dir_attributes $crash_PATH
 
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
     rlPhaseEnd
 
     rlPhaseStartTest list
         prepare
         generate_crash
-        get_crash_path
         wait_for_hooks
+        get_crash_path
 
         rlRun "python3 -c 'import problem; assert len(problem.list()) == 1'"
 
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
     rlPhaseEnd
 
     rlPhaseStartTest edit
         prepare
         generate_crash
-        get_crash_path
         wait_for_hooks
+        get_crash_path
 
         rlRun "python3 edit.py"
         # ^ should delete coredump and replace will_segfault with 31337 in cmdline
@@ -92,14 +92,14 @@ rlJournalStart
     rlPhaseStartTest create
         prepare
         rlRun "python3 create.py" 
+        wait_for_hooks
         get_crash_path
         echo $crash_PATH
-        wait_for_hooks
 
         rlAssertExists $crash_PATH/reason
         rlAssertGrep "runtime" $crash_PATH/analyzer
 
-        rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+        remove_problem_directory
     rlPhaseEnd
 
 

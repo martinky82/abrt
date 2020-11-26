@@ -10,8 +10,8 @@ import os
 import getopt
 import augeas
 
-from report import dd_opendir, DD_FAIL_QUIETLY_ENOENT, run_event_state
-from reportclient import set_verbosity, error_msg_and_die, error_msg, log1, log
+from report import dd_opendir, DD_FAIL_QUIETLY_ENOENT, run_event_on_problem_dir
+from reportclient import set_verbosity, error_msg_and_die, error_msg, log1, log_warning
 
 GETTEXT_PROGNAME = "abrt"
 import locale
@@ -25,11 +25,6 @@ def init_gettext():
     except locale.Error:
         os.environ['LC_ALL'] = 'C'
         locale.setlocale(locale.LC_ALL, "")
-    # Defeat "AttributeError: 'module' object has no attribute 'nl_langinfo'"
-    try:
-        gettext.bind_textdomain_codeset(GETTEXT_PROGNAME, locale.nl_langinfo(locale.CODESET))
-    except AttributeError:
-        pass
     gettext.bindtextdomain(GETTEXT_PROGNAME, '/usr/share/locale')
     gettext.textdomain(GETTEXT_PROGNAME)
 
@@ -78,8 +73,7 @@ def get_bugzilla_reports(reported_to):
     return bugs
 
 def run_event(event_name, dump_dir_name):
-    state = run_event_state()
-    ret = state.run_event_on_dir_name(dump_dir_name, event_name)
+    state, ret = run_event_on_problem_dir(dump_dir_name, event_name)
     if ret == 0 and state.children_count == 0:
         log1("Didn't find definition of event '%s'", event_name)
 
@@ -131,6 +125,7 @@ if __name__ == "__main__":
         report_type = dd.load_text("analyzer", 0)
 
     core_backtrace_exists = dd.exist("core_backtrace")
+    packaged = dd.exist("package")
     reported_to = dd.load_text("reported_to", DD_FAIL_QUIETLY_ENOENT)
     ureports_counter = try_parse_number(dd, "ureports_counter")
     count = try_parse_number(dd, "count")
@@ -145,7 +140,7 @@ if __name__ == "__main__":
         if reported_to and reported_to != "":
             bugs = get_bugzilla_reports(reported_to)
             if bugs:
-                log(_("A bug was already filed about this problem:"))
+                log_warning(_("A bug was already filed about this problem:"))
                 bugs = sorted(bugs)
                 for bug in bugs:
                     print(bug)
@@ -155,13 +150,28 @@ if __name__ == "__main__":
         else:
             log1("'%s/reported_to' doesn't exist", dirname)
 
-        log(_("uReport was already sent, not sending it again"))
+        log_warning(_("uReport was already sent, not sending it again"))
         sys.exit(0)
 
     if report_type == "CCpp" and not core_backtrace_exists:
         exitcode = spawn_and_wait("abrt-action-generate-core-backtrace")
         if exitcode != 0:
             log1("uReport can't be sent without core_backtrace. Exiting.")
+            sys.exit(1)
+
+    if not packaged:
+        log1("Problem comes from unpackaged executable.")
+
+        process_unpackaged_str = os.getenv("uReport_ProcessUnpackaged")
+        if not process_unpackaged_str:
+            augeas_conf = get_augeas("libreport", "/etc/libreport/plugins/ureport.conf")
+            process_unpackaged_str = augeas_conf.get("/files/etc/libreport/plugins/ureport.conf/ProcessUnpackaged")
+        process_unpackaged = False
+        if process_unpackaged_str:
+            process_unpackaged = process_unpackaged_str.lower() in ['yes', '1', 'on']
+
+        if not process_unpackaged:
+            log_warning(_("Problem comes from unpackaged executable. Unable to create uReport."))
             sys.exit(1)
 
     exitcode = spawn_and_wait("reporter-ureport")
@@ -176,13 +186,13 @@ if __name__ == "__main__":
         watch = os.getenv("uReport_WatchReportedBugs") or ""
         if exitcode == 70 and watch.lower() in ["yes", "on", "1"]:
             if reported_to and reported_to != "" and get_bugzilla_reports(reported_to):
-                log(_("Adding you to CC List of the existing bugzilla bug"))
+                log_warning(_("Adding you to CC List of the existing bugzilla bug"))
                 run_event("watch_Bugzilla", dirname)
 
         email = os.getenv("uReport_ContactEmail")
         if not email:
-            augeas = get_augeas("libreport", "/etc/libreport/plugins/ureport.conf")
-            email = augeas.get("/files/etc/libreport/plugins/ureport.conf/ContactEmail")
+            augeas_conf = get_augeas("libreport", "/etc/libreport/plugins/ureport.conf")
+            email = augeas_conf.get("/files/etc/libreport/plugins/ureport.conf/ContactEmail")
 
         if email:
             log1("Attaching ContactEmail: " + email)
@@ -190,4 +200,5 @@ if __name__ == "__main__":
 
         sys.exit(exitcode)
     else:
-        error_msg_and_die(_("reporter-ureport failed with exit code %d" % exitcode))
+        log1(_("reporter-ureport failed with exit code %d" % exitcode))
+        sys.exit(exitcode)

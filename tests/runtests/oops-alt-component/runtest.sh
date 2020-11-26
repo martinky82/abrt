@@ -30,7 +30,7 @@
 
 TEST="oops-alt-component"
 PACKAGE="abrt"
-EXAMPLES_PATH="../../../examples"
+EXAMPLES_PATH="../../examples"
 
 rlJournalStart
     rlPhaseStartSetup
@@ -62,7 +62,7 @@ rlJournalStart
             rlAssertGrep "kernel" "$crash_PATH/pkg_name"
             rlAssertGrep "$kernel_version" "$crash_PATH/pkg_version"
 
-            rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+            remove_problem_directory
         done
     rlPhaseEnd
 

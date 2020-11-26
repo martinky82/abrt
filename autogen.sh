@@ -6,7 +6,7 @@ cat << EOH
 Prepares the source tree for configuration
 
 Usage:
-  autogen.sh [sydeps [--install]]
+  autogen.sh [sysdeps [--install]]
 
 Options:
 
@@ -16,9 +16,21 @@ Options:
 EOH
 }
 
-build_depslist()
+parse_build_requires_from_spec_file()
 {
-    DEPS_LIST=`grep "^\(Build\)\?Requires:" *.spec.in | grep -v "%{name}" | tr -s " " | tr "," "\n" | cut -f2 -d " " | grep -v "^abrt" | sort -u | while read br; do if [ "%" = ${br:0:1} ]; then grep "%define $(echo $br | sed -e 's/%{\(.*\)}/\1/')" *.spec.in | tr -s " " | cut -f3 -d" "; else echo $br ;fi ; done | tr "\n" " "`
+    PACKAGE=$1
+    TEMPFILE=$(mktemp -u --suffix=.spec)
+    sed 's/@PACKAGE_VERSION@/1/' < $PACKAGE.spec.in | sed 's/@.*@//' > $TEMPFILE
+    rpmspec -P $TEMPFILE | grep "^\(Build\)\?Requires:" | \
+        tr -s " " | tr "," "\n" | cut -f2- -d " " | \
+        grep -v "\(^\|python[23]-\)"$PACKAGE | sort -u | sed -E 's/^(.*) (.*)$/"\1 \2"/' | tr \" \'
+    rm $TEMPFILE
+}
+
+list_build_dependencies()
+{
+    local BUILD_SYSTEM_DEPS_LIST="gettext-devel"
+    echo $BUILD_SYSTEM_DEPS_LIST $(parse_build_requires_from_spec_file abrt)
 }
 
 case "$1" in
@@ -27,11 +39,10 @@ case "$1" in
             exit 0
         ;;
     "sysdeps")
-            build_depslist
-
+            DEPS_LIST=$(list_build_dependencies)
             if [ "$2" == "--install" ]; then
                 set -x verbose
-                sudo dnf install --setopt=strict=0 $DEPS_LIST
+                eval sudo dnf --assumeyes install --setopt=strict=0 $DEPS_LIST
                 set +x verbose
             else
                 echo $DEPS_LIST
@@ -42,32 +53,29 @@ case "$1" in
             echo "Running gen-version"
             ./gen-version
 
-            mkdir -p m4
-            echo "Creating m4/aclocal.m4 ..."
-            test -r m4/aclocal.m4 || touch m4/aclocal.m4
-
-            echo "Running autopoint"
-            autopoint --force || exit 1
+            echo "Running autoreconf"
+            autoreconf --install --force --verbose || exit 1
 
             echo "Running intltoolize..."
             intltoolize --force --copy --automake || exit 1
 
-            echo "Running aclocal..."
-            aclocal || exit 1
-
-            echo "Running libtoolize..."
-            libtoolize || exit 1
-
-            echo "Running autoheader..."
-            autoheader || return 1
-
-            echo "Running autoconf..."
-            autoconf --force || exit 1
-
-            echo "Running automake..."
-            automake --add-missing --force --copy || exit 1
-
-            echo "Running configure ..."
-            ./configure "$@"
+            if [ -z "$NOCONFIGURE" ]; then
+                echo "Running configure ..."
+                if [ 0 -eq $# ]; then
+                    ./configure \
+                        --prefix=/usr \
+                        --mandir=/usr/share/man \
+                        --infodir=/usr/share/info \
+                        --sysconfdir=/etc \
+                        --localstatedir=/var \
+                        --sharedstatedir=/var/lib \
+                        --enable-native-unwinder \
+                        --enable-dump-time-unwind \
+                        --enable-debug
+                    echo "Configured for local debugging ..."
+                else
+                    ./configure "$@"
+                fi
+            fi
         ;;
 esac

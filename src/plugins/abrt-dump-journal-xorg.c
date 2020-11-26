@@ -17,7 +17,8 @@
 #include "xorg-utils.h"
 #define ABRT_JOURNAL_XORG_WATCH_STATE_FILE VAR_STATE"/abrt-dump-journal-xorg.state"
 #define XORG_CONF "xorg.conf"
-#define XORG_CONF_PATH "/etc/abrt/plugins/"XORG_CONF
+#define XORG_CONF_PATH PLUGINS_CONF_DIR XORG_CONF
+#define XORG_DEFAULT_JOURNAL_FILTERS "_COMM=gdm-x-session, _COMM=gnome-shell"
 
 static void
 abrt_xorg_process_list_of_crashes(GList *crashes, const char *dump_location, int flags)
@@ -47,7 +48,7 @@ static GList *abrt_journal_extract_xorg_crashes(abrt_journal_t *journal)
 
     do
     {
-        char *line = abrt_journal_get_log_line(journal);
+        g_autofree char *line = abrt_journal_get_log_line(journal);
         if (line == NULL)
             error_msg_and_die(_("Cannot read journal data."));
 
@@ -60,11 +61,10 @@ static GList *abrt_journal_extract_xorg_crashes(abrt_journal_t *journal)
             else
                 log_warning(_("Failed to parse Backtrace from journal"));
         }
-        free(line);
     }
     while (abrt_journal_next(journal) > 0);
 
-    log("Found crashes: %d", g_list_length(crash_info_list));
+    log_warning("Found crashes: %d", g_list_length(crash_info_list));
 
     return crash_info_list;
 }
@@ -114,6 +114,7 @@ static void watch_journald(abrt_journal_t *journal, const char *dump_location, i
         .decorated_cb = abrt_journal_watch_extract_xorg_crashes,
         .decorated_cb_data = &watch_conf,
         .strings = xorg_strings,
+        .blacklisted_strings = NULL,
     };
 
     abrt_journal_watch_t *watch = NULL;
@@ -147,7 +148,7 @@ int main(int argc, char *argv[])
         "-c and -e options conflicts because both specifies the first read message.\n"
         "\n"
         "-e is useful only for -f because the following of journal starts by reading \n"
-        "the entire journal if the last seen possition is not available.\n"
+        "the entire journal if the last seen position is not available.\n"
         "\n"
         "The last seen position is saved in %s\n"
         "\n"
@@ -157,7 +158,8 @@ int main(int argc, char *argv[])
 
     char program_usage_string[strlen(program_usage_string_template)
                             + strlen(ABRT_JOURNAL_XORG_WATCH_STATE_FILE)
-                            + strlen(XORG_CONF_PATH)];
+                            + strlen(XORG_CONF_PATH)
+                            + 1/*terminating null*/];
     sprintf(program_usage_string, program_usage_string_template,
             ABRT_JOURNAL_XORG_WATCH_STATE_FILE, XORG_CONF_PATH);
 
@@ -184,7 +186,7 @@ int main(int argc, char *argv[])
 
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_BOOL(  's', NULL, NULL, _("Log to syslog")),
         OPT_BOOL(  'o', NULL, NULL, _("Print found crashes on standard output")),
         OPT_STRING('d', NULL, &dump_location, "DIR", _("Create new problem directory in DIR for every crash found")),
@@ -199,14 +201,14 @@ int main(int argc, char *argv[])
         OPT_LIST(  'j', NULL, &journal_filters,  "FILTER", _("Journal filter e.g. '_COMM=gdm-x-session' (may be given many times)")),
         OPT_END()
     };
-    unsigned opts = parse_opts(argc, argv, program_options, program_usage_string);
+    unsigned opts = libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
-    msg_prefix = g_progname;
+    libreport_msg_prefix = libreport_g_progname;
     if ((opts & OPT_s) || getenv("ABRT_SYSLOG"))
     {
-        logmode = LOGMODE_JOURNAL;
+        libreport_logmode = LOGMODE_JOURNAL;
     }
 
     if ((opts & OPT_c) && (opts & OPT_e))
@@ -215,11 +217,11 @@ int main(int argc, char *argv[])
     if (opts & OPT_D)
     {
         if (opts & OPT_d)
-            show_usage_and_die(program_usage_string, program_options);
-        load_abrt_conf();
-        dump_location = g_settings_dump_location;
-        g_settings_dump_location = NULL;
-        free_abrt_conf_data();
+            libreport_show_usage_and_die(program_usage_string, program_options);
+        abrt_load_abrt_conf();
+        dump_location = abrt_g_settings_dump_location;
+        abrt_g_settings_dump_location = NULL;
+        abrt_free_abrt_conf_data();
     }
 
     int xorg_utils_flags = 0;
@@ -248,15 +250,19 @@ int main(int argc, char *argv[])
     }
     else
     {
-        map_string_t *settings = new_map_string();
+        g_autoptr(GHashTable) settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
         log_notice("Loading settings from '%s'", XORG_CONF);
-        load_abrt_plugin_conf_file(XORG_CONF, settings);
+        abrt_load_abrt_plugin_conf_file(XORG_CONF, settings);
         log_debug("Loaded '%s'", XORG_CONF);
-        const char *conf_journal_filters = get_map_string_item_or_NULL(settings, "JournalFilters");
-        xorg_journal_filter = parse_list(conf_journal_filters);
+
+        const char *conf_journal_filters = g_hash_table_lookup(settings, "JournalFilters");
+        if (!conf_journal_filters) {
+            conf_journal_filters = XORG_DEFAULT_JOURNAL_FILTERS;
+        }
+
+        xorg_journal_filter = libreport_parse_delimited_list(conf_journal_filters, ",");
         /* list data will be free by g_list_free_full */
         free_filter_list_data = true;
-        free_map_string(settings);
         if (xorg_journal_filter)
             log_debug("Using journal filter from conf file %s", XORG_CONF);
     }

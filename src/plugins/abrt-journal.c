@@ -47,7 +47,7 @@ static int abrt_journal_new_flags(abrt_journal_t **journal, int flags)
         return r;
     }
 
-    *journal = xzalloc(sizeof(**journal));
+    *journal = g_malloc0(sizeof(**journal));
     (*journal)->j = j;
 
     return 0;
@@ -73,7 +73,7 @@ static int abrt_journal_open_directory_flags(abrt_journal_t **journal, const cha
         return r;
     }
 
-    *journal = xzalloc(sizeof(**journal));
+    *journal = g_malloc0(sizeof(**journal));
     (*journal)->j = j;
 
     return 0;
@@ -131,69 +131,104 @@ int abrt_journal_get_field(abrt_journal_t *journal, const char *field, const voi
     return 0;
 }
 
-static int abrt_journal_get_integer(abrt_journal_t *journal, const char *field, long min, long max, long *value)
+static long int abrt_journal_get_long(abrt_journal_t *journal,
+                                      const char     *key,
+                                      long int       *value)
 {
-    char buffer[sizeof(int)*3 + 2];
-    const char *data;
-    size_t data_len;
+    const void *data;
+    size_t data_length;
+    int retval;
+    g_autofree char *data_string = NULL;
+    char *end;
 
-    const int r = abrt_journal_get_field(journal, field, (const void **)&data, &data_len);
-    if (r < 0)
-        return r;
-
-    if (data_len >= sizeof(buffer))
+    retval = abrt_journal_get_field(journal, key, &data, &data_length);
+    if (retval < 0)
     {
-        log_notice("Journald field '%s' is not a number: too long", field);
-        return -EINVAL;
+        return false;
     }
-
-    strncpy(buffer, data, data_len);
-    buffer[data_len] = '\0';
+    data_string = g_strndup(data, data_length);
 
     errno = 0;
-    char *e = NULL;
-    *value = strtol(buffer, &e, 10);
-    if (errno || buffer == e || *e != '\0' || *value < min || *value > max)
+
+    *value = strtol(data_string, &end, 10);
+
+    if (0 != errno)
     {
-        log_notice("Journald field '%s' is not a number: '%s'", field, buffer);
-        return -EINVAL;
+        char *error_message;
+
+        error_message = strerror(errno);
+
+        error_msg("Converting field “%s” value “%s” to integer failed: %s",
+                  key, data_string, error_message);
+
+        return false;
+    }
+    /* No data or garbage after numeric data */
+    if (end == data_string || '\0' != *end)
+    {
+        error_msg("Journal message field “%s” value “%s” is empty or not a number",
+                  key, data_string);
+        return false;
     }
 
-    return 0;
+    return true;
 }
 
-int abrt_journal_get_int_field(abrt_journal_t *journal, const char *field, int *value)
-{
-    long v;
-    int r = abrt_journal_get_integer(journal, field, INT_MIN, INT_MAX, &v);
-    if (r != 0)
-        return r;
+#define GET_TYPED_FIELD_FROM_LONG(journal, key, type, value_out)       \
+    G_STMT_START                                                       \
+    {                                                                  \
+        long int _value;                                               \
+                                                                       \
+        if (!abrt_journal_get_long(journal, key, &_value))             \
+        {                                                              \
+            return false;                                              \
+        }                                                              \
+                                                                       \
+        g_return_val_if_fail((long int)(type)_value == _value, false); \
+                                                                       \
+        *(value_out) = (type)_value;                                   \
+                                                                       \
+        return true;                                                   \
+    }                                                                  \
+    G_STMT_END
 
-    *value = (int)v;
-    return 0;
+bool abrt_journal_get_int(abrt_journal_t *journal,
+                          const char     *key,
+                          int            *value)
+{
+    g_return_val_if_fail(NULL != value, false);
+
+    GET_TYPED_FIELD_FROM_LONG(journal, key, int, value);
 }
 
-int abrt_journal_get_unsigned_field(abrt_journal_t *journal, const char *field, unsigned *value)
+bool abrt_journal_get_pid(abrt_journal_t *journal,
+                          const char     *key,
+                          pid_t          *value)
 {
-    long v;
-    int r = abrt_journal_get_integer(journal, field, 0, UINT_MAX, &v);
-    if (r != 0)
-        return r;
+    g_return_val_if_fail(NULL != value, false);
 
-    *value = (unsigned)v;
-    return 0;
+    GET_TYPED_FIELD_FROM_LONG(journal, key, pid_t, value);
+}
+
+bool abrt_journal_get_uid(abrt_journal_t *journal,
+                          const char     *key,
+                          uid_t          *value)
+{
+    g_return_val_if_fail(NULL != value, false);
+
+    GET_TYPED_FIELD_FROM_LONG(journal, key, uid_t, value);
 }
 
 char *abrt_journal_get_string_field(abrt_journal_t *journal, const char *field, char *value)
 {
     size_t data_len;
-    const char *data;
-    const int r = abrt_journal_get_field(journal, field, (const void **)&data, &data_len);
+    const void *data;
+    const int r = abrt_journal_get_field(journal, field, &data, &data_len);
     if (r < 0)
         return NULL;
 
     if (value == NULL)
-        return xstrndup(data, data_len);
+        return g_strndup(data, data_len);
     /*else*/
 
     strncpy(value, data, data_len);
@@ -265,7 +300,7 @@ int abrt_journal_next(abrt_journal_t *journal)
 
 int abrt_journal_save_current_position(abrt_journal_t *journal, const char *file_name)
 {
-    char *crsr = NULL;
+    g_autofree char *crsr = NULL;
     const int r = abrt_journal_get_cursor(journal, &crsr);
 
     if (r < 0)
@@ -285,10 +320,9 @@ int abrt_journal_save_current_position(abrt_journal_t *journal, const char *file
         return -1;
     }
 
-    full_write_str(state_fd, crsr);
+    libreport_full_write_str(state_fd, crsr);
     close(state_fd);
 
-    free(crsr);
     return 0;
 }
 
@@ -326,9 +360,9 @@ int abrt_journal_restore_position(abrt_journal_t *journal, const char *file_name
         return -errno;
     }
 
-    char *crsr = xmalloc(buf.st_size + 1);
+    g_autofree char *crsr = g_malloc(buf.st_size + 1);
 
-    const int sz = full_read(state_fd, crsr, buf.st_size);
+    const int sz = libreport_full_read(state_fd, crsr, buf.st_size);
     if (sz != buf.st_size)
     {
         error_msg(_("Cannot restore journal watch's position: cannot read entire file '%s'"), file_name);
@@ -347,7 +381,6 @@ int abrt_journal_restore_position(abrt_journal_t *journal, const char *file_name
         return r;
     }
 
-    free(crsr);
     return 0;
 }
 
@@ -381,7 +414,7 @@ int abrt_journal_watch_new(abrt_journal_watch_t **watch, abrt_journal_t *journal
 {
     assert(callback != NULL || !"ABRT watch needs valid callback ptr");
 
-    *watch = xzalloc(sizeof(**watch));
+    *watch = g_malloc0(sizeof(**watch));
     (*watch)->j = journal;
     (*watch)->callback = callback;
     (*watch)->callback_data = callback_data;
@@ -469,15 +502,17 @@ void abrt_journal_watch_notify_strings(abrt_journal_watch_t *watch, void *data)
         error_msg_and_die("Cannot read journal data.");
 
     GList *cur = conf->strings;
-    while (cur)
-    {
+    for (; cur; cur = g_list_next(cur))
         if (strstr(message, cur->data) != NULL)
             break;
 
-        cur = g_list_next(cur);
-    }
-
+    GList *blacklist_cur = conf->blacklisted_strings;
     if (cur)
+        for (; blacklist_cur; blacklist_cur = g_list_next(blacklist_cur))
+            if (strstr(message, blacklist_cur->data) != NULL)
+                break;
+
+    if (cur && !blacklist_cur)
         conf->decorated_cb(watch, conf->decorated_cb_data);
 }
 

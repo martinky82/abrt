@@ -1,11 +1,12 @@
-%{!?python_site: %global python_site %(%{__python} -c "from distutils.sysconfig import get_python_lib; print get_python_lib(0)")}
-# platform-dependent
-%{!?python_sitearch: %global python_sitearch %(%{__python} -c "from distutils.sysconfig import get_python_lib; print get_python_lib(1)")}
+# http://fedoraproject.org/wiki/Packaging:Guidelines#PIE
+# http://fedoraproject.org/wiki/Hardened_Packages
+%global _hardened_build 1
 
-%if 0%{?fedora:%{fedora} < 14}%{?rhel:%{rhel} < 7}
-    %bcond_with systemd
+%if 0%{?fedora} || 0%{?rhel} > 7
+# Enable python3 build by default
+%bcond_without python3
 %else
-    %bcond_without systemd
+%bcond_with python3
 %endif
 
 %if 0%{?rhel}%{?suse_version}
@@ -17,33 +18,21 @@
 # build abrt-atomic subpackage
 %bcond_without atomic
 
-%ifarch aarch64
-%define have_kexec_tools 0
-%else
-%define have_kexec_tools 1
-%endif
+# build abrt-retrace-client by default
+%bcond_without retrace
 
-%if 0%{?rhel} >= 6
-    %define desktopvendor redhat
-%else
-    %if 0%{?suse_version}
-        %define desktopvendor suse
-    %else
-        %define desktopvendor fedora
-    %endif
+# rpmbuild --define 'desktopvendor mystring'
+%if "x%{desktopvendor}" == "x"
+    %define desktopvendor %(source /etc/os-release; echo ${ID})
 %endif
 
 %if 0%{?suse_version}
 %define dbus_devel dbus-1-devel
 %define libjson_devel libjson-devel
-%define nss_devel mozilla-nss-devel
-%define systemd_units systemd
 %define shadow_utils pwdutils
 %else
 %define dbus_devel dbus-devel
 %define libjson_devel json-c-devel
-%define nss_devel nss-devel
-%define systemd_units systemd-units
 %define shadow_utils shadow-utils
 %endif
 
@@ -54,46 +43,42 @@
     %define docdirversion -%{version}
 %endif
 
-%define libreport_ver 2.6.0
-%define satyr_ver 0.18
+%define libreport_ver 2.14.0
+%define satyr_ver 0.24
 
 Summary: Automatic bug detection and reporting tool
 Name: abrt
 Version: @PACKAGE_VERSION@
 Release: 1%{?dist}
 License: GPLv2+
-Group: Applications/System
 URL: https://abrt.readthedocs.org/
-Source: https://fedorahosted.org/released/%{name}/%{name}-%{version}.tar.gz
+Source: https://github.com/abrt/%{name}/releases/download/%{version}/%{name}-%{version}.tar.gz
 BuildRequires: %{dbus_devel}
+BuildRequires: hostname
 BuildRequires: gtk3-devel
-BuildRequires: glib2-devel >= 2.43
+BuildRequires: glib2-devel >= 2.43.4
 BuildRequires: rpm-devel >= 4.6
 BuildRequires: desktop-file-utils
 BuildRequires: libnotify-devel
 #why? BuildRequires: file-devel
-BuildRequires: python-devel
-BuildRequires: python3-devel
 BuildRequires: gettext
 BuildRequires: libxml2-devel
 BuildRequires: intltool
 BuildRequires: libtool
-BuildRequires: %{nss_devel}
+BuildRequires: libsoup-devel
 BuildRequires: asciidoc
 BuildRequires: doxygen
 BuildRequires: xmlto
 BuildRequires: libreport-devel >= %{libreport_ver}
 BuildRequires: satyr-devel >= %{satyr_ver}
-BuildRequires: systemd-python
-BuildRequires: python3-systemd
 BuildRequires: augeas
 BuildRequires: libselinux-devel
-BuildRequires: python-argcomplete
+%if %{with python3}
+BuildRequires: python3-devel
+BuildRequires: python3-systemd
 BuildRequires: python3-argcomplete
-BuildRequires: python-argh
-BuildRequires: python3-argh
-BuildRequires: python-humanize
-BuildRequires: python3-humanize
+BuildRequires: python3-dbus
+%endif # with python3
 
 Requires: libreport >= %{libreport_ver}
 Requires: satyr >= %{satyr_ver}
@@ -103,20 +88,48 @@ BuildRequires: dbus-1-glib-devel
 Requires: dbus-1-glib
 %endif
 
-%if %{with systemd}
-Requires: %{systemd_units}
-%endif
-BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
+%{?systemd_requires}
+Requires: systemd
 Requires: %{name}-libs = %{version}-%{release}
-Requires: %{name}-python3 = %{version}-%{release}
+Requires: python3-%{name} = %{version}-%{release}
 Requires(pre): %{shadow_utils}
+%if %{with python3}
 Requires: python3-augeas
 Requires: python3-dbus
-Requires: python3-dmidecode
-Requires: libreport-plugin-ureport
-%if 0%{?rhel}
-Requires: libreport-plugin-rhtsupport
+%endif # with python3
+%ifarch aarch64 i686 x86_64
+Requires: dmidecode
 %endif
+Requires: libreport-plugin-ureport
+%if 0%{?fedora}
+Requires: libreport-plugin-systemd-journal
+%endif
+
+#gui
+BuildRequires: libreport-gtk-devel >= %{libreport_ver}
+BuildRequires: gsettings-desktop-schemas-devel >= 3.15
+#addon-ccpp
+BuildRequires: gdb-headless
+#addon-kerneloops
+BuildRequires: systemd-devel
+BuildRequires: %{libjson_devel}
+%if %{with bodhi}
+# plugin-bodhi
+BuildRequires: libreport-web-devel >= %{libreport_ver}
+%endif
+#desktop
+#Default config of addon-ccpp requires gdb
+BuildRequires: gdb-headless
+#dbus
+BuildRequires: polkit-devel
+%if %{with python3}
+#python3-abrt
+BuildRequires: python3-pytest
+BuildRequires: python3-sphinx
+BuildRequires: python3-libreport
+#python3-abrt-doc
+BuildRequires: python3-devel
+%endif # with python3
 
 %description
 %{name} is a tool to help users to detect defects in applications and
@@ -125,14 +138,12 @@ It uses plugin system to extend its functionality.
 
 %package libs
 Summary: Libraries for %{name}
-Group: System Environment/Libraries
 
 %description libs
 Libraries for %{name}.
 
 %package devel
 Summary: Development libraries for %{name}
-Group: Development/Libraries
 Requires: abrt-libs = %{version}-%{release}
 
 %description devel
@@ -140,14 +151,13 @@ Development libraries and headers for %{name}.
 
 %package gui-libs
 Summary: Libraries for %{name}-gui
-Group: System Environment/Libraries
+Requires: %{name}-libs = %{version}-%{release}
 
 %description gui-libs
 Libraries for %{name}-gui.
 
 %package gui-devel
 Summary: Development libraries for %{name}-gui
-Group: Development/Libraries
 Requires: abrt-gui-libs = %{version}-%{release}
 
 %description gui-devel
@@ -155,13 +165,10 @@ Development libraries and headers for %{name}-gui.
 
 %package gui
 Summary: %{name}'s gui
-Group: User Interface/Desktops
 Requires: %{name} = %{version}-%{release}
 Requires: %{name}-dbus = %{version}-%{release}
 Requires: gnome-abrt
 Requires: gsettings-desktop-schemas >= 3.15
-BuildRequires: libreport-gtk-devel >= %{libreport_ver}
-BuildRequires: gsettings-desktop-schemas-devel >= 3.15
 # we used to have abrt-applet, now abrt-gui includes it:
 Provides: abrt-applet = %{version}-%{release}
 Obsoletes: abrt-applet < 0.0.5
@@ -172,60 +179,52 @@ Requires: abrt-gui-libs = %{version}-%{release}
 %description gui
 GTK+ wizard for convenient bug reporting.
 
-%package addon-coredump-helper
-Summary: %{name}'s /proc/sys/kernel/core_pattern helper
-Group: System Environment/Libraries
-Requires: abrt-libs = %{version}-%{release}
-
-%description addon-coredump-helper
-This package contains hook for C/C++ crashed programs.
-
 %package addon-ccpp
 Summary: %{name}'s C/C++ addon
-Group: System Environment/Libraries
 Requires: cpio
-%if 0%{?fedora:%{fedora} > 22}
-Requires: gdb >= gdb-7.9.50.20150531
-%else
-Requires: gdb >= 7.9.1-16
-%endif
+Requires: gdb-headless
 Requires: elfutils
 %if 0%{!?rhel:1}
+%if %{with retrace}
 # abrt-action-perform-ccpp-analysis wants to run analyze_RetraceServer:
 Requires: %{name}-retrace-client
 %endif
+%endif
 Requires: %{name} = %{version}-%{release}
-Requires: %{name}-addon-coredump-helper = %{version}-%{release}
 Requires: abrt-libs = %{version}-%{release}
-Requires: libreport-python3
+%if %{with python3}
+Requires: python3-libreport
+%endif # with python3
+Obsoletes: abrt-addon-coredump-helper <= 2.12.2
+
 
 %description addon-ccpp
 This package contains %{name}'s C/C++ analyzer plugin.
 
 %package addon-upload-watch
 Summary: %{name}'s upload addon
-Group: System Environment/Libraries
 Requires: %{name} = %{version}-%{release}
 Requires: abrt-libs = %{version}-%{release}
 
 %description addon-upload-watch
 This package contains hook for uploaded problems.
 
+%if %{with retrace}
 %package retrace-client
 Summary: %{name}'s retrace client
-Group: System Environment/Libraries
 Requires: %{name} = %{version}-%{release}
 Requires: xz
 Requires: tar
+Requires: p11-kit-trust
+Requires: libsoup
 
 %description retrace-client
 This package contains the client application for Retrace server
 which is able to analyze C/C++ crashes remotely.
+%endif
 
 %package addon-kerneloops
 Summary: %{name}'s kerneloops addon
-Group: System Environment/Libraries
-BuildRequires: systemd-devel
 Requires: curl
 Requires: %{name} = %{version}-%{release}
 %if 0%{!?rhel:1}
@@ -239,7 +238,6 @@ system log.
 
 %package addon-xorg
 Summary: %{name}'s Xorg addon
-Group: System Environment/Libraries
 Requires: curl
 Requires: %{name} = %{version}-%{release}
 Requires: abrt-libs = %{version}-%{release}
@@ -248,28 +246,28 @@ Requires: abrt-libs = %{version}-%{release}
 This package contains plugin for collecting Xorg crash information from Xorg
 log.
 
-%if %{?have_kexec_tools} == 1
 %package addon-vmcore
 Summary: %{name}'s vmcore addon
-Group: System Environment/Libraries
 Requires: %{name} = %{version}-%{release}
 Requires: abrt-addon-kerneloops
 Requires: kexec-tools
-Requires: abrt-python3
+%if %{with python3}
+Requires: python3-abrt
 Requires: python3-augeas
+%endif # with python3
+Requires: util-linux
 
 %description addon-vmcore
 This package contains plugin for collecting kernel crash information from
 vmcore files.
-%endif
 
 %package addon-pstoreoops
 Summary: %{name}'s pstore oops addon
-Group: System Environment/Libraries
 Requires: %{name} = %{version}-%{release}
 Requires: abrt-libs = %{version}-%{release}
 Requires: abrt-addon-kerneloops
-Obsoletes: abrt-addon-uefioops
+Obsoletes: abrt-addon-uefioops <= 2.1.6
+Provides: abrt-addon-uefioops = %{version}-%{release}
 
 %description addon-pstoreoops
 This package contains plugin for collecting kernel oopses from pstore storage.
@@ -277,88 +275,79 @@ This package contains plugin for collecting kernel oopses from pstore storage.
 %if %{with bodhi}
 %package plugin-bodhi
 Summary: %{name}'s bodhi plugin
-BuildRequires: %{libjson_devel}
-Group: System Environment/Libraries
 Requires: %{name} = %{version}-%{release}
-BuildRequires: libreport-web-devel >= %{libreport_ver}
-BuildRequires: hawkey-devel
-Obsoletes: libreport-plugin-bodhi > 0.0.1
-Provides: libreport-plugin-bodhi
+Obsoletes: libreport-plugin-bodhi <= 2.0.10
+Provides: libreport-plugin-bodhi = %{version}-%{release}
 
 %description plugin-bodhi
 Search for a new updates in bodhi server.
 %endif
 
-%package addon-python
-Summary: %{name}'s addon for catching and analyzing Python exceptions
-Group: System Environment/Libraries
-Requires: python
-Requires: %{name} = %{version}-%{release}
-Requires: systemd-python
-Requires: abrt-python
-
-%description addon-python
-This package contains python hook and python analyzer plugin for handling
-uncaught exception in python programs.
-
-%package addon-python3
+%if %{with python3}
+%package -n python3-abrt-addon
 Summary: %{name}'s addon for catching and analyzing Python 3 exceptions
-Group: System Environment/Libraries
-Requires: python3
+BuildArch: noarch
 Requires: %{name} = %{version}-%{release}
 Requires: python3-systemd
-Requires: abrt-python3
+Requires: python3-abrt
 
-%description addon-python3
+%description -n python3-abrt-addon
 This package contains python 3 hook and python analyzer plugin for handling
 uncaught exception in python 3 programs.
 
+%package -n python3-abrt-container-addon
+Summary: %{name}'s container addon for catching Python 3 exceptions
+Conflicts: python3-abrt-addon
+Requires: container-exception-logger
+
+%description -n python3-abrt-container-addon
+This package contains python 3 hook and handling uncaught exception in python 3
+programs in container.
+%endif # with python3
+
+%package plugin-machine-id
+Summary: %{name}'s plugin to generate machine_id based off dmidecode
+Requires: %{name} = %{version}-%{release}
+
+%description plugin-machine-id
+This package contains a configuration snippet to enable automatic generation
+of machine_id for abrt events.
+
 %package tui
 Summary: %{name}'s command line interface
-Group: User Interface/Desktops
 Requires: %{name} = %{version}-%{release}
 Requires: libreport-cli >= %{libreport_ver}
 Requires: abrt-libs = %{version}-%{release}
 Requires: abrt-dbus
+%if %{with python3}
+Requires: python3-abrt
+Requires: abrt-addon-ccpp
+Requires: python3-argcomplete
+
+Provides: %{name}-cli-ng = %{version}-%{release}
+Obsoletes: %{name}-cli-ng < 2.12.2
+%endif # with python3
 
 %description tui
 This package contains a simple command line client for processing abrt reports
 in command line environment.
 
-%package cli-ng
-Summary: %{name}'s improved command line interface
-Group: User Interface/Desktops
-Requires: %{name} = %{version}-%{release}
-Requires: libreport-cli >= %{libreport_ver}
-Requires: abrt-libs = %{version}-%{release}
-Requires: abrt-dbus
-Requires: abrt-python
-Requires: abrt-addon-ccpp
-Requires: python-argh
-Requires: python-argcomplete
-Requires: python-humanize
-
-%description cli-ng
-New generation command line interface for ABRT
-
 %package cli
 Summary: Virtual package to make easy default installation on non-graphical environments
-Group: Applications/System
 Requires: %{name} = %{version}-%{release}
 Requires: abrt-tui
 Requires: abrt-addon-kerneloops
 Requires: abrt-addon-pstoreoops
-%if %{?have_kexec_tools} == 1
 Requires: abrt-addon-vmcore
-%endif
 Requires: abrt-addon-ccpp
-Requires: abrt-addon-python3
+%if %{with python3}
+Requires: python3-abrt-addon
+%endif # with python3
 Requires: abrt-addon-xorg
-%if 0%{?rhel}
-Requires: libreport-rhel >= %{libreport_ver}
-Requires: libreport-plugin-rhtsupport >= %{libreport_ver}
-%else
+%if ! 0%{?rhel}
+%if %{with retrace}
 Requires: abrt-retrace-client
+%endif
 %if %{with bodhi}
 Requires: abrt-plugin-bodhi
 %endif
@@ -378,7 +367,6 @@ environment.
 
 %package desktop
 Summary: Virtual package to make easy default installation on desktop environments
-Group: User Interface/Desktops
 # This package gets installed when anything requests bug-buddy -
 # happens when users upgrade Fn to Fn+1;
 # or if user just wants "typical desktop installation".
@@ -387,21 +375,19 @@ Group: User Interface/Desktops
 Requires: %{name} = %{version}-%{release}
 Requires: abrt-addon-kerneloops
 Requires: abrt-addon-pstoreoops
-%if %{?have_kexec_tools} == 1
 Requires: abrt-addon-vmcore
-%endif
 Requires: abrt-addon-ccpp
-Requires: abrt-addon-python3
+%if %{with python3}
+Requires: python3-abrt-addon
+%endif # with python3
 Requires: abrt-addon-xorg
-# Default config of addon-ccpp requires gdb
-Requires: gdb >= 7.8.1-31
+Requires: gdb-headless
 Requires: abrt-gui
 Requires: gnome-abrt
-%if 0%{?rhel}
-Requires: libreport-rhel >= %{libreport_ver}
-Requires: libreport-plugin-rhtsupport >= %{libreport_ver}
-%else
+%if ! 0%{?rhel}
+%if %{with retrace}
 Requires: abrt-retrace-client
+%endif
 %if %{with bodhi}
 Requires: abrt-plugin-bodhi
 %endif
@@ -415,7 +401,7 @@ Requires: libreport-fedora >= %{libreport_ver}
 %endif
 %endif
 #Requires: abrt-plugin-firefox
-Provides: bug-buddy
+Provides: bug-buddy = %{version}-%{release}
 
 %description desktop
 Virtual package to install all necessary packages for usage from desktop
@@ -424,8 +410,7 @@ environment.
 %if %{with atomic}
 %package atomic
 Summary: Package to make easy default installation on Atomic hosts.
-Group: Applications/System
-Requires: %{name}-addon-coredump-helper = %{version}-%{release}
+Requires: %{name}-libs = %{version}-%{release}
 Conflicts: %{name}-addon-ccpp
 
 %description atomic
@@ -435,73 +420,40 @@ hosts.
 
 %package dbus
 Summary: ABRT DBus service
-Group: Applications/System
 Requires: %{name} = %{version}-%{release}
-BuildRequires: polkit-devel
 Requires: abrt-libs = %{version}-%{release}
+Requires: dbus-tools
 
 %description dbus
 ABRT DBus service which provides org.freedesktop.problems API on dbus and
 uses PolicyKit to authorize to access the problem data.
 
-
-%package python
-Summary: ABRT Python API
-Group: System Environment/Libraries
-Requires: %{name} = %{version}-%{release}
-Requires: %{name}-libs = %{version}-%{release}
-Requires: %{name}-dbus = %{version}-%{release}
-Requires: dbus-python
-Requires: libreport-python
-BuildRequires: python-nose
-BuildRequires: python-sphinx
-BuildRequires: libreport-python
-
-%description python
-High-level API for querying, creating and manipulating
-problems handled by ABRT in Python.
-
-%package python-doc
-Summary: ABRT Python API Documentation
-Group: Documentation
-BuildArch: noarch
-BuildRequires: python2-devel
-Requires: %{name} = %{version}-%{release}
-Requires: %{name}-python = %{version}-%{release}
-
-%description python-doc
-Examples and documentation for ABRT Python API.
-
-%package python3
+%if %{with python3}
+%package -n python3-abrt
 Summary: ABRT Python 3 API
-Group: System Environment/Libraries
 Requires: %{name} = %{version}-%{release}
 Requires: %{name}-libs = %{version}-%{release}
 Requires: %{name}-dbus = %{version}-%{release}
 Requires: python3-dbus
-Requires: libreport-python3
-BuildRequires: python3-nose
-BuildRequires: python3-sphinx
-BuildRequires: libreport-python3
+Requires: python3-libreport
+Requires: python3-gobject-base
 
-%description python3
+%description -n python3-abrt
 High-level API for querying, creating and manipulating
 problems handled by ABRT in Python 3.
 
-%package python3-doc
+%package -n python3-abrt-doc
 Summary: ABRT Python API Documentation
-Group: Documentation
 BuildArch: noarch
-BuildRequires: python3-devel
 Requires: %{name} = %{version}-%{release}
-Requires: %{name}-python3 = %{version}-%{release}
+Requires: python3-%{name} = %{version}-%{release}
 
-%description python3-doc
+%description -n python3-abrt-doc
 Examples and documentation for ABRT Python 3 API.
+%endif # with python3
 
 %package console-notification
 Summary: ABRT console notification script
-Group: Applications/System
 Requires: %{name} = %{version}-%{release}
 Requires: %{name}-cli = %{version}-%{release}
 
@@ -515,39 +467,36 @@ to the shell
 %build
 autoconf
 
-%define var_base_dir spool
+%define default_dump_dir %{_localstatedir}/spool/abrt
 
 CFLAGS="%{optflags} -Werror" %configure \
-%if 0%{?suse_version}
-        --with-systemdsystemunitdir="%{_unitdir}" \
-%endif
+%if %{without python3}
+        --without-python3 \
+%endif # with python3
 %if %{without bodhi}
         --without-bodhi \
 %endif
 %if %{without atomic}
         --without-atomic \
 %endif
-%if 0%{?rhel}
-        --enable-suggest-autoreporting \
-        --enable-authenticated-autoreporting \
+%if %{without retrace}
+        --without-retrace \
 %endif
-%ifnarch arm armhfp armv7hl armv7l aarch64
+%ifnarch %{arm}
         --enable-native-unwinder \
 %endif
-%if %{?have_kexec_tools} == 0
-        --disable-addon-vmcore \
-%endif
-        --with-defaultdumplocation=/var/%{var_base_dir}/abrt \
+        --with-defaultdumplocation=%{default_dump_dir} \
         --enable-doxygen-docs \
         --enable-dump-time-unwind \
         --disable-silent-rules
 
-make %{?_smp_mflags}
+%make_build
 
 %install
-rm -rf $RPM_BUILD_ROOT
-make install DESTDIR=$RPM_BUILD_ROOT \
-             mandir=%{_mandir} \
+%make_install \
+%if %{with python3}
+             PYTHON=%{__python3} \
+%endif # with python3
              dbusabrtdocdir=%{_defaultdocdir}/%{name}-dbus%{docdirversion}/html/
 
 %find_lang %{name}
@@ -557,31 +506,37 @@ make install DESTDIR=$RPM_BUILD_ROOT \
 # for those which needs to be byte-compiled with different
 # version (python2/python3).
 # rpm can do this work and use the appropriate python version.
-find $RPM_BUILD_ROOT -name "*.py[co]" -delete
+find %{buildroot} -name "*.py[co]" -delete
 
 # remove all .la and .a files
-find $RPM_BUILD_ROOT -name '*.la' -or -name '*.a' | xargs rm -f
-mkdir -p ${RPM_BUILD_ROOT}/%{_initrddir}
-mkdir -p $RPM_BUILD_ROOT/var/cache/abrt-di
-mkdir -p $RPM_BUILD_ROOT/var/run/abrt
-mkdir -p $RPM_BUILD_ROOT/var/%{var_base_dir}/abrt
-mkdir -p $RPM_BUILD_ROOT/var/spool/abrt-upload
-mkdir -p $RPM_BUILD_ROOT%{_localstatedir}/lib/abrt
+find %{buildroot} -name '*.la' -or -name '*.a' | xargs rm -f
+mkdir -p %{buildroot}%{_localstatedir}/cache/abrt-di
+mkdir -p %{buildroot}%{_localstatedir}/lib/abrt
+mkdir -p %{buildroot}%{_localstatedir}/run/abrt
+mkdir -p %{buildroot}%{_localstatedir}/spool/abrt-upload
+mkdir -p %{buildroot}%{default_dump_dir}
 
 desktop-file-install \
-        --dir ${RPM_BUILD_ROOT}%{_datadir}/applications \
-        src/applet/abrt-applet.desktop
+        --dir %{buildroot}%{_datadir}/applications \
+        src/applet/org.freedesktop.problems.applet.desktop
 
-ln -sf %{_datadir}/applications/abrt-applet.desktop ${RPM_BUILD_ROOT}%{_sysconfdir}/xdg/autostart/
+ln -sf %{_datadir}/applications/org.freedesktop.problems.applet.desktop %{buildroot}%{_sysconfdir}/xdg/autostart/
+%if %{with python3}
+ln -sf %{_bindir}/abrt %{buildroot}%{_bindir}/abrt-cli
+ln -sf %{_mandir}/man1/abrt.1 %{buildroot}%{_mandir}/man1/abrt-cli.1
+%endif
 
 # After everything is installed, remove info dir
 rm -f %{buildroot}%{_infodir}/dir
 
-%clean
-rm -rf $RPM_BUILD_ROOT
-
 %check
-make check
+make check|| {
+    # find and print the logs of failed test
+    # do not cat tests/testsuite.log because it contains a lot of bloat
+    find src -name "test-suite.log" -print -exec cat '{}' \;
+    find tests/testsuite.dir -name "testsuite.log" -print -exec cat '{}' \;
+    exit 1
+}
 
 %pre
 #uidgid pair 173:173 reserved in setup rhbz#670231
@@ -595,23 +550,31 @@ exit 0
 %systemd_post abrtd.service
 
 %post addon-ccpp
-# this is required for transition from 1.1.x to 2.x
-# because /cache/abrt-di/* was created under root with root:root
-# so 2.x fails when it tries to extract debuginfo there..
-chown -R abrt:abrt %{_localstatedir}/cache/abrt-di
-%systemd_post abrt-ccpp.service
+# migration from 2.14.1.18
+if [ ! -e "%{_localstatedir}/cache/abrt-di/.migration-group-add" ]; then
+  chmod -R g+w %{_localstatedir}/cache/abrt-di
+  touch "%{_localstatedir}/cache/abrt-di/.migration-group-add"
+fi
+
 %systemd_post abrt-journal-core.service
+%journal_catalog_update
 
 %post addon-kerneloops
 %systemd_post abrt-oops.service
+%journal_catalog_update
 
 %post addon-xorg
 %systemd_post abrt-xorg.service
+%journal_catalog_update
 
-%if %{?have_kexec_tools} == 1
+%if %{with python3}
+%post -n python3-abrt-addon
+%journal_catalog_update
+%endif # with python3
+
 %post addon-vmcore
 %systemd_post abrt-vmcore.service
-%endif
+%journal_catalog_update
 
 %post addon-pstoreoops
 %systemd_post abrt-pstoreoops.service
@@ -623,7 +586,6 @@ chown -R abrt:abrt %{_localstatedir}/cache/abrt-di
 %systemd_preun abrtd.service
 
 %preun addon-ccpp
-%systemd_preun abrt-ccpp.service
 %systemd_preun abrt-journal-core.service
 
 %preun addon-kerneloops
@@ -632,10 +594,8 @@ chown -R abrt:abrt %{_localstatedir}/cache/abrt-di
 %preun addon-xorg
 %systemd_preun abrt-xorg.service
 
-%if %{?have_kexec_tools} == 1
 %preun addon-vmcore
 %systemd_preun abrt-vmcore.service
-%endif
 
 %preun addon-pstoreoops
 %systemd_preun abrt-pstoreoops.service
@@ -647,7 +607,6 @@ chown -R abrt:abrt %{_localstatedir}/cache/abrt-di
 %systemd_postun_with_restart abrtd.service
 
 %postun addon-ccpp
-%systemd_postun_with_restart abrt-ccpp.service
 %systemd_postun_with_restart abrt-journal-core.service
 
 %postun addon-kerneloops
@@ -656,10 +615,8 @@ chown -R abrt:abrt %{_localstatedir}/cache/abrt-di
 %postun addon-xorg
 %systemd_postun_with_restart abrt-xorg.service
 
-%if %{?have_kexec_tools} == 1
 %postun addon-vmcore
 %systemd_postun_with_restart abrt-vmcore.service
-%endif
 
 %postun addon-pstoreoops
 %systemd_postun_with_restart abrt-pstoreoops.service
@@ -676,31 +633,17 @@ touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
 if [ -f /etc/abrt/plugins/CCpp.conf ]; then
     mv /etc/abrt/plugins/CCpp.conf /etc/abrt/plugins/CCpp.conf.rpmsave.atomic || exit 1;
 fi
-ln -sf /etc/abrt/plugins/CCpp_Atomic.conf /etc/abrt/plugins/CCpp.conf
-if [ -f /usr/share/abrt/conf.d/plugins/CCpp.conf ]; then
-    mv /usr/share/abrt/conf.d/plugins/CCpp.conf /usr/share/abrt/conf.d/plugins/CCpp.conf.rpmsave.atomic || exit 1;
-fi
-ln -sf /usr/share/abrt/conf.d/plugins/CCpp_Atomic.conf /usr/share/abrt/conf.d/plugins/CCpp.conf
-%systemd_post abrt-coredump-helper.service
 
 %preun atomic
 if [ -L /etc/abrt/plugins/CCpp.conf ]; then
     rm /etc/abrt/plugins/CCpp.conf
 fi
-if [ -L /usr/share/abrt/conf.d/plugins/CCpp.conf ]; then
-    rm /usr/share/abrt/conf.d/plugins/CCpp.conf
-fi
 if [ -f /etc/abrt/plugins/CCpp.conf.rpmsave.atomic ]; then
     mv /etc/abrt/plugins/CCpp.conf.rpmsave.atomic /etc/abrt/plugins/CCpp.conf || exit 1
 fi
-if [ -f  /usr/share/abrt/conf.d/plugins/CCpp.conf.rpmsave.atomic ]; then
-    mv /usr/share/abrt/conf.d/plugins/CCpp.conf.rpmsave.atomic /usr/share/abrt/conf.d/plugins/CCpp.conf || exit 1
-fi
-
-%postun atomic
-%systemd_postun_with_restart abrt-coredump-helper.service
 %endif # with atomic
 
+%if 0%{?rhel} && 0%{?rhel} <= 7
 %post libs -p /sbin/ldconfig
 
 %postun libs -p /sbin/ldconfig
@@ -714,15 +657,18 @@ if [ $1 -eq 0 ] ; then
     touch --no-create %{_datadir}/icons/hicolor &>/dev/null
     gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 fi
+%endif
 
 %posttrans
 # update the old problem dirs to contain "type" element
 service abrtd condrestart >/dev/null 2>&1 || :
 
 %posttrans addon-ccpp
-# Regenerate core_bactraces because of missing crash threads
-service abrt-ccpp condrestart >/dev/null 2>&1 || :
-abrtdir=$(grep "DumpLocation" /etc/abrt/abrt.conf | cut -d'=' -f2 | tr -d ' ')
+# Regenerate core_backtraces because of missing crash threads
+abrtdir=$(grep "^\s*DumpLocation\b" /etc/abrt/abrt.conf | tail -1 | cut -d'=' -f2 | tr -d ' ')
+if test -z "$abrtdir"; then
+    abrtdir=%{default_dump_dir}
+fi
 if test -d "$abrtdir"; then
     for DD in `find "$abrtdir" -mindepth 1 -maxdepth 1 -type d`
     do
@@ -739,7 +685,6 @@ service abrt-oops condrestart >/dev/null 2>&1 || :
 %posttrans addon-xorg
 service abrt-xorg condrestart >/dev/null 2>&1 || :
 
-%if %{?have_kexec_tools} == 1
 %posttrans addon-vmcore
 service abrt-vmcore condrestart >/dev/null 2>&1 || :
 # Copy the configuration file to plugin's directory
@@ -748,89 +693,68 @@ test -f /etc/abrt/abrt-harvest-vmcore.conf && {
     mv -b /etc/abrt/abrt-harvest-vmcore.conf /etc/abrt/plugins/vmcore.conf
 }
 exit 0
-%endif
 
 %posttrans addon-pstoreoops
 service abrt-pstoreoops condrestart >/dev/null 2>&1 || :
-
-%posttrans gui
-gtk-update-icon-cache %{_datadir}/icons/hicolor &>/dev/null || :
 
 %posttrans dbus
 # Force abrt-dbus to restart like we do with the other services
 killall abrt-dbus >/dev/null 2>&1 || :
 
 %files -f %{name}.lang
-%defattr(-,root,root,-)
-%doc README COPYING
-%if %{with systemd}
+%doc README.md COPYING
 %{_unitdir}/abrtd.service
 %{_tmpfilesdir}/abrt.conf
-%else
-%{_initrddir}/abrtd
-%endif
 %{_sbindir}/abrtd
 %{_sbindir}/abrt-server
 %{_sbindir}/abrt-auto-reporting
 %{_libexecdir}/abrt-handle-event
 %{_libexecdir}/abrt-action-ureport
-%{_libexecdir}/abrt-action-generate-machine-id
+%{_libexecdir}/abrt-action-save-container-data
 %{_bindir}/abrt-handle-upload
 %{_bindir}/abrt-action-notify
-%{_mandir}/man1/abrt-action-notify.1.gz
+%{_mandir}/man1/abrt-action-notify.1*
 %{_bindir}/abrt-action-save-package-data
-%{_bindir}/abrt-action-save-container-data
 %{_bindir}/abrt-watch-log
 %{_bindir}/abrt-action-analyze-python
 %{_bindir}/abrt-action-analyze-xorg
 %config(noreplace) %{_sysconfdir}/dbus-1/system.d/org.freedesktop.problems.daemon.conf
+%config(noreplace) %{_sysconfdir}/%{name}/abrt.conf
 %config(noreplace) %{_sysconfdir}/%{name}/abrt-action-save-package-data.conf
-%{_datadir}/%{name}/conf.d/abrt-action-save-package-data.conf
-%config(noreplace) %{_sysconfdir}/%{name}/plugins/xorg.conf
-%{_datadir}/%{name}/conf.d/plugins/xorg.conf
-%{_mandir}/man5/abrt-xorg.conf.5.gz
 %config(noreplace) %{_sysconfdir}/%{name}/gpg_keys.conf
-%{_datadir}/%{name}/conf.d/gpg_keys.conf
-%{_mandir}/man5/gpg_keys.conf.5.gz
 %config(noreplace) %{_sysconfdir}/libreport/events.d/abrt_event.conf
-%{_mandir}/man5/abrt_event.conf.5.gz
+%{_mandir}/man5/abrt_event.conf.5*
 %config(noreplace) %{_sysconfdir}/libreport/events.d/smart_event.conf
-%{_mandir}/man5/smart_event.conf.5.gz
-%dir %attr(@DEFAULT_DUMP_LOCATION_MODE@, root, abrt) %{_localstatedir}/%{var_base_dir}/%{name}
+%{_mandir}/man5/smart_event.conf.5*
+%dir %attr(@DEFAULT_DUMP_LOCATION_MODE@, root, abrt) %{default_dump_dir}
 %dir %attr(0700, abrt, abrt) %{_localstatedir}/spool/%{name}-upload
 # abrtd runs as root
-%dir %attr(0755, root, root) %{_localstatedir}/run/%{name}
+%ghost %dir %attr(0755, root, root) %{_localstatedir}/run/%{name}
 %ghost %attr(0666, -, -) %{_localstatedir}/run/%{name}/abrt.socket
 %ghost %attr(0644, -, -) %{_localstatedir}/run/%{name}/abrtd.pid
 
-%{_mandir}/man1/abrt-handle-upload.1.gz
-%{_mandir}/man1/abrt-server.1.gz
-%{_mandir}/man1/abrt-action-save-package-data.1.gz
-%{_mandir}/man1/abrt-watch-log.1.gz
+%{_mandir}/man1/abrt-handle-upload.1*
+%{_mandir}/man1/abrt-server.1*
+%{_mandir}/man1/abrt-action-save-package-data.1*
+%{_mandir}/man1/abrt-watch-log.1*
 %{_mandir}/man1/abrt-action-analyze-python.1*
-%{_mandir}/man1/abrt-action-analyze-xorg.1.gz
-%{_mandir}/man1/abrt-auto-reporting.1.gz
-%{_mandir}/man8/abrtd.8.gz
-%{_mandir}/man5/abrt-action-save-package-data.conf.5.gz
-# {_mandir}/man5/pyhook.conf.5.gz
+%{_mandir}/man1/abrt-action-analyze-xorg.1*
+%{_mandir}/man1/abrt-auto-reporting.1*
+%{_mandir}/man5/abrt.conf.5*
+%{_mandir}/man5/abrt-action-save-package-data.conf.5*
+%{_mandir}/man5/gpg_keys.conf.5*
+%{_mandir}/man8/abrtd.8*
 
 %files libs
-%defattr(-,root,root,-)
 %{_libdir}/libabrt.so.*
-%config(noreplace) %{_sysconfdir}/%{name}/abrt.conf
-%{_datadir}/%{name}/conf.d/abrt.conf
-%{_mandir}/man5/abrt.conf.5.gz
 %dir %{_sysconfdir}/%{name}
 %dir %{_sysconfdir}/%{name}/plugins
 %dir %{_datadir}/%{name}
-%dir %{_datadir}/%{name}/conf.d
-%dir %{_datadir}/%{name}/conf.d/plugins
 
 # filesystem package should own /usr/share/augeas/lenses directory
 %{_datadir}/augeas/lenses/abrt.aug
 
 %files devel
-%defattr(-,root,root,-)
 # The complex pattern below (instead of simlpy *) excludes Makefile{.am,.in}:
 %doc apidoc/html/*.{html,png,css,js}
 %{_includedir}/abrt/abrt-dbus.h
@@ -841,53 +765,41 @@ killall abrt-dbus >/dev/null 2>&1 || :
 %{_libdir}/pkgconfig/abrt.pc
 
 %files gui-libs
-%defattr(-,root,root,-)
 %{_libdir}/libabrt_gui.so.*
 
 %files gui-devel
-%defattr(-,root,root,-)
 %{_includedir}/abrt/abrt-config-widget.h
 %{_includedir}/abrt/system-config-abrt.h
 %{_libdir}/libabrt_gui.so
 %{_libdir}/pkgconfig/abrt_gui.pc
 
 %files gui
-%defattr(-,root,root,-)
 %dir %{_datadir}/%{name}
 # all glade, gtkbuilder and py files for gui
 %{_datadir}/icons/hicolor/*/apps/*
-%{_datadir}/icons/hicolor/*/status/*
-%{_datadir}/%{name}/icons/hicolor/*/status/*
 %{_datadir}/%{name}/ui/*
 %{_bindir}/abrt-applet
 %{_bindir}/system-config-abrt
 #%%{_bindir}/test-report
-%{_datadir}/applications/abrt-applet.desktop
-%config(noreplace) %{_sysconfdir}/xdg/autostart/abrt-applet.desktop
+%{_datadir}/applications/org.freedesktop.problems.applet.desktop
+%config(noreplace) %{_sysconfdir}/xdg/autostart/org.freedesktop.problems.applet.desktop
+%{_datadir}/dbus-1/services/org.freedesktop.problems.applet.service
 %{_mandir}/man1/abrt-applet.1*
 %{_mandir}/man1/system-config-abrt.1*
 
-%files addon-coredump-helper
-%defattr(-,root,root,-)
-%{_libexecdir}/abrt-hook-ccpp
-%{_sbindir}/abrt-install-ccpp-hook
-
 %files addon-ccpp
-%defattr(-,root,root,-)
 %dir %attr(0775, abrt, abrt) %{_localstatedir}/cache/abrt-di
 %config(noreplace) %{_sysconfdir}/%{name}/plugins/CCpp.conf
-%{_datadir}/%{name}/conf.d/plugins/CCpp.conf
-%{_mandir}/man5/abrt-CCpp.conf.5.gz
+%{_mandir}/man5/abrt-CCpp.conf.5*
 %{_libexecdir}/abrt-gdb-exploitable
-%if %{with systemd}
-%{_unitdir}/abrt-ccpp.service
+%config(noreplace) %{_sysconfdir}/libreport/plugins/catalog_journal_ccpp_format.conf
 %{_unitdir}/abrt-journal-core.service
-%else
-%{_initrddir}/abrt-ccpp
-%endif
+%{_journalcatalogdir}/abrt_ccpp.catalog
 
-# attr(6755) ~= SETUID|SETGID
-%attr(6755, abrt, abrt) %{_libexecdir}/abrt-action-install-debuginfo-to-abrt-cache
+%dir %{_localstatedir}/lib/abrt
+
+# attr(2755) ~= SETGID
+%attr(2755, abrt, abrt) %{_libexecdir}/abrt-action-install-debuginfo-to-abrt-cache
 
 %{_bindir}/abrt-action-analyze-c
 %{_bindir}/abrt-action-trim-files
@@ -902,13 +814,14 @@ killall abrt-dbus >/dev/null 2>&1 || :
 %{_bindir}/abrt-action-analyze-ccpp-local
 %{_bindir}/abrt-dump-journal-core
 %config(noreplace) %{_sysconfdir}/libreport/events.d/ccpp_event.conf
-%{_mandir}/man5/ccpp_event.conf.5.gz
+%{_mandir}/man5/ccpp_event.conf.5*
 %config(noreplace) %{_sysconfdir}/libreport/events.d/gconf_event.conf
-%{_mandir}/man5/gconf_event.conf.5.gz
+%{_mandir}/man5/gconf_event.conf.5*
 %config(noreplace) %{_sysconfdir}/libreport/events.d/vimrc_event.conf
-%{_mandir}/man5/vimrc_event.conf.5.gz
+%{_mandir}/man5/vimrc_event.conf.5*
 %{_datadir}/libreport/events/analyze_CCpp.xml
 %{_datadir}/libreport/events/analyze_LocalGDB.xml
+%{_datadir}/libreport/events/analyze_RetraceServer.xml
 %{_datadir}/libreport/events/collect_xsession_errors.xml
 %{_datadir}/libreport/events/collect_GConf.xml
 %{_datadir}/libreport/events/collect_vimrc_user.xml
@@ -920,7 +833,6 @@ killall abrt-dbus >/dev/null 2>&1 || :
 %{_mandir}/man*/abrt-action-generate-core-backtrace.*
 %{_mandir}/man*/abrt-action-analyze-backtrace.*
 %{_mandir}/man*/abrt-action-list-dsos.*
-%{_mandir}/man*/abrt-install-ccpp-hook.*
 %{_mandir}/man*/abrt-action-install-debuginfo.*
 %{_mandir}/man*/abrt-action-analyze-ccpp-local.*
 %{_mandir}/man*/abrt-action-analyze-core.*
@@ -929,74 +841,56 @@ killall abrt-dbus >/dev/null 2>&1 || :
 %{_mandir}/man1/abrt-dump-journal-core.1*
 
 %files addon-upload-watch
-%defattr(-,root,root,-)
 %{_sbindir}/abrt-upload-watch
-%if %{with systemd}
 %{_unitdir}/abrt-upload-watch.service
-%else
-%{_initrddir}/abrt-upload-watch
-%endif
 %{_mandir}/man*/abrt-upload-watch.*
 
 
+%if %{with retrace}
 %files retrace-client
 %{_bindir}/abrt-retrace-client
-%{_mandir}/man1/abrt-retrace-client.1.gz
+%{_mandir}/man1/abrt-retrace-client.1*
 %config(noreplace) %{_sysconfdir}/libreport/events.d/ccpp_retrace_event.conf
-%{_mandir}/man5/ccpp_retrace_event.conf.5.gz
-%{_datadir}/libreport/events/analyze_RetraceServer.xml
+%{_mandir}/man5/ccpp_retrace_event.conf.5*
+%endif
 
 %files addon-kerneloops
-%defattr(-,root,root,-)
 %config(noreplace) %{_sysconfdir}/libreport/events.d/koops_event.conf
-%{_mandir}/man5/koops_event.conf.5.gz
+%{_journalcatalogdir}/abrt_koops.catalog
+%config(noreplace) %{_sysconfdir}/libreport/plugins/catalog_koops_format.conf
+%{_mandir}/man5/koops_event.conf.5*
 %config(noreplace) %{_sysconfdir}/%{name}/plugins/oops.conf
-%{_datadir}/%{name}/conf.d/plugins/oops.conf
-%if %{with systemd}
 %{_unitdir}/abrt-oops.service
-%else
-%{_initrddir}/abrt-oops
-%endif
 
 %dir %{_localstatedir}/lib/abrt
 
 %{_bindir}/abrt-dump-oops
 %{_bindir}/abrt-dump-journal-oops
 %{_bindir}/abrt-action-analyze-oops
-%{_bindir}/abrt-action-save-kernel-data
 %{_mandir}/man1/abrt-dump-oops.1*
 %{_mandir}/man1/abrt-dump-journal-oops.1*
 %{_mandir}/man1/abrt-action-analyze-oops.1*
-%{_mandir}/man1/abrt-action-save-kernel-data.1*
 %{_mandir}/man5/abrt-oops.conf.5*
 
 %files addon-xorg
-%defattr(-,root,root,-)
 %config(noreplace) %{_sysconfdir}/libreport/events.d/xorg_event.conf
-%{_mandir}/man5/xorg_event.conf.5.gz
-%if %{with systemd}
+%{_journalcatalogdir}/abrt_xorg.catalog
+%config(noreplace) %{_sysconfdir}/libreport/plugins/catalog_xorg_format.conf
+%config(noreplace) %{_sysconfdir}/%{name}/plugins/xorg.conf
 %{_unitdir}/abrt-xorg.service
-%else
-%{_initrddir}/abrt-xorg
-%endif
 %{_bindir}/abrt-dump-xorg
 %{_bindir}/abrt-dump-journal-xorg
 %{_mandir}/man1/abrt-dump-xorg.1*
 %{_mandir}/man1/abrt-dump-journal-xorg.1*
+%{_mandir}/man5/abrt-xorg.conf.5*
+%{_mandir}/man5/xorg_event.conf.5*
 
-%if %{?have_kexec_tools} == 1
 %files addon-vmcore
-%defattr(-,root,root,-)
 %config(noreplace) %{_sysconfdir}/libreport/events.d/vmcore_event.conf
-%{_mandir}/man5/vmcore_event.conf.5.gz
+%{_mandir}/man5/vmcore_event.conf.5*
 %config(noreplace) %{_sysconfdir}/%{name}/plugins/vmcore.conf
-%{_datadir}/%{name}/conf.d/plugins/vmcore.conf
 %{_datadir}/libreport/events/analyze_VMcore.xml
-%if %{with systemd}
 %{_unitdir}/abrt-vmcore.service
-%else
-%{_initrddir}/abrt-vmcore
-%endif
 %{_sbindir}/abrt-harvest-vmcore
 %{_bindir}/abrt-action-analyze-vmcore
 %{_bindir}/abrt-action-check-oops-for-alt-component
@@ -1005,122 +899,735 @@ killall abrt-dbus >/dev/null 2>&1 || :
 %{_mandir}/man5/abrt-vmcore.conf.5*
 %{_mandir}/man1/abrt-action-analyze-vmcore.1*
 %{_mandir}/man1/abrt-action-check-oops-for-hw-error.1*
-%endif
+%{_journalcatalogdir}/abrt_vmcore.catalog
+%config(noreplace) %{_sysconfdir}/libreport/plugins/catalog_vmcore_format.conf
 
 %files addon-pstoreoops
-%defattr(-,root,root,-)
-%if %{with systemd}
 %{_unitdir}/abrt-pstoreoops.service
-%else
-%{_initrddir}/abrt-pstoreoops
-%endif
 %{_sbindir}/abrt-harvest-pstoreoops
 %{_bindir}/abrt-merge-pstoreoops
 %{_mandir}/man1/abrt-harvest-pstoreoops.1*
 %{_mandir}/man1/abrt-merge-pstoreoops.1*
 
-%files addon-python
-%defattr(-,root,root,-)
-%config(noreplace) %{_sysconfdir}/%{name}/plugins/python.conf
-%{_datadir}/%{name}/conf.d/plugins/python.conf
-%{_mandir}/man5/abrt-python.conf.5.gz
-%config(noreplace) %{_sysconfdir}/libreport/events.d/python_event.conf
-%{_mandir}/man5/python_event.conf.5.gz
-%{python_sitearch}/abrt*.py*
-%{python_sitearch}/abrt.pth
-
-%files addon-python3
-%defattr(-,root,root,-)
+%if %{with python3}
+%files -n python3-abrt-addon
 %config(noreplace) %{_sysconfdir}/%{name}/plugins/python3.conf
-%{_datadir}/%{name}/conf.d/plugins/python3.conf
-%{_mandir}/man5/abrt-python3.conf.5.gz
+%{_mandir}/man5/python3-abrt.conf.5*
 %config(noreplace) %{_sysconfdir}/libreport/events.d/python3_event.conf
-%{_mandir}/man5/python3_event.conf.5.gz
-%{python3_sitearch}/abrt*
-%{python3_sitearch}/__pycache__/abrt*
+%{_journalcatalogdir}/python3_abrt.catalog
+%config(noreplace) %{_sysconfdir}/libreport/plugins/catalog_python3_format.conf
+%{_mandir}/man5/python3_event.conf.5*
+%{python3_sitelib}/abrt3.pth
+%{python3_sitelib}/abrt_exception_handler3.py
+%{python3_sitelib}/__pycache__/abrt_exception_handler3.*
+
+%files -n python3-abrt-container-addon
+%{python3_sitelib}/abrt3_container.pth
+%{python3_sitelib}/abrt_exception_handler3_container.py
+%{python3_sitelib}/__pycache__/abrt_exception_handler3_container.*
+%endif # with python3
+
+%files plugin-machine-id
+%config(noreplace) %{_sysconfdir}/libreport/events.d/machine-id_event.conf
+%{_libexecdir}/abrt-action-generate-machine-id
 
 %files cli
-%defattr(-,root,root,-)
 
 %files tui
-%defattr(-,root,root,-)
-%{_bindir}/abrt-cli
-%{_mandir}/man1/abrt-cli.1.gz
-
-%files cli-ng
-%defattr(-,root,root,-)
+%if %{with python3}
 %config(noreplace) %{_sysconfdir}/bash_completion.d/abrt.bash_completion
 %{_bindir}/abrt
-%{python_sitearch}/abrtcli/
-%{_mandir}/man1/abrt.1.gz
+%{_bindir}/abrt-cli
+%{python3_sitelib}/abrtcli/
+%{_mandir}/man1/abrt.1*
+%{_mandir}/man1/abrt-cli.1*
+%endif # with python3
 
 %files desktop
-%defattr(-,root,root,-)
 
 %if %{with atomic}
 %files atomic
-%defattr(-,root,root,-)
-%config(noreplace) %{_sysconfdir}/%{name}/plugins/CCpp_Atomic.conf
-%{_unitdir}/abrt-coredump-helper.service
-%{_datadir}/%{name}/conf.d/plugins/CCpp_Atomic.conf
 %config(noreplace) %{_sysconfdir}/%{name}/abrt-action-save-package-data.conf
 %{_bindir}/abrt-action-save-package-data
-%{_mandir}/man1/abrt-action-save-package-data.1.gz
-%{_mandir}/man5/abrt-action-save-package-data.conf.5.gz
+%{_mandir}/man1/abrt-action-save-package-data.1*
+%{_mandir}/man5/abrt-action-save-package-data.conf.5*
 %endif
 
 %if %{with bodhi}
 %files plugin-bodhi
-%defattr(-,root,root,-)
 %{_bindir}/abrt-bodhi
 %{_bindir}/abrt-action-find-bodhi-update
-%{_mandir}/man1/abrt-bodhi.1.gz
-%{_mandir}/man1/abrt-action-find-bodhi-update.1.gz
+%config(noreplace) %{_sysconfdir}/libreport/events.d/bodhi_event.conf
+%{_datadir}/libreport/events/analyze_BodhiUpdates.xml
+%{_mandir}/man1/abrt-bodhi.1*
+%{_mandir}/man1/abrt-action-find-bodhi-update.1*
 %endif
 
 %files dbus
-%defattr(-,root,root,-)
 %{_sbindir}/abrt-dbus
-%{_sbindir}/abrt-configuration
-%{_mandir}/man8/abrt-dbus.8.gz
-%{_mandir}/man8/abrt-configuration.8.gz
+%{_mandir}/man8/abrt-dbus.8*
 %config(noreplace) %{_sysconfdir}/dbus-1/system.d/dbus-abrt.conf
-%{_datadir}/dbus-1/interfaces/org.freedesktop.Problems.xml
-%{_datadir}/dbus-1/interfaces/com.redhat.problems.configuration.xml
-%{_datadir}/dbus-1/interfaces/com.redhat.problems.configuration.abrt.xml
-%{_datadir}/dbus-1/interfaces/com.redhat.problems.configuration.ccpp.xml
-%{_datadir}/dbus-1/interfaces/com.redhat.problems.configuration.oops.xml
-%{_datadir}/dbus-1/interfaces/com.redhat.problems.configuration.python.xml
-%if %{?have_kexec_tools} == 1
-%{_datadir}/dbus-1/interfaces/com.redhat.problems.configuration.vmcore.xml
-%endif
-%{_datadir}/dbus-1/interfaces/com.redhat.problems.configuration.xorg.xml
+%{_datadir}/dbus-1/interfaces/org.freedesktop.Problems2.xml
+%{_datadir}/dbus-1/interfaces/org.freedesktop.Problems2.Entry.xml
+%{_datadir}/dbus-1/interfaces/org.freedesktop.Problems2.Session.xml
+%{_datadir}/dbus-1/interfaces/org.freedesktop.Problems2.Task.xml
 %{_datadir}/dbus-1/system-services/org.freedesktop.problems.service
-%{_datadir}/dbus-1/system-services/com.redhat.problems.configuration.service
 %{_datadir}/polkit-1/actions/abrt_polkit.policy
 %dir %{_defaultdocdir}/%{name}-dbus%{docdirversion}/
 %dir %{_defaultdocdir}/%{name}-dbus%{docdirversion}/html/
 %{_defaultdocdir}/%{name}-dbus%{docdirversion}/html/*.html
 %{_defaultdocdir}/%{name}-dbus%{docdirversion}/html/*.css
+%config(noreplace) %{_sysconfdir}/libreport/events.d/abrt_dbus_event.conf
 
-%files python
-%{python_sitearch}/problem/
-%{_mandir}/man5/abrt-python.5.gz
-
-%files python-doc
-%{python_sitelib}/problem_examples
-
-%files python3
+%if %{with python3}
+%files -n python3-abrt
 %{python3_sitearch}/problem/
-%{_mandir}/man5/abrt-python3.5.gz
+%{_mandir}/man5/python3-abrt.5*
 
-%files python3-doc
+%files -n python3-abrt-doc
 %{python3_sitelib}/problem_examples
+%endif # with python3
 
 %files console-notification
 %config(noreplace) %{_sysconfdir}/profile.d/abrt-console-notification.sh
 
 %changelog
+* Mon Aug 17 2020 Michal Fabik <mfabik@redhat.com> 2.14.4-1
+- oops-utils: Respect the 'world-readable' flag
+- Decommission libreport_list_free_with_free
+- Purge commented-out code
+
+* Wed Aug 12 2020 Michal Fabik <mfabik@redhat.com> 2.14.3-1
+- Update translations
+- plugins: abrt-dump-journal-core: Handle zstd compression
+- lib: Check rename() return code
+- retrace-client: Fix memory leak
+- a-a-save-container-data: Fix possible NULL dereferences
+- lib: Fix resource leak
+- lib: Remove ignored_problems
+- lib,a-retrace-client: Check fstat() return value
+- daemon: Refactor signal pipe callback
+- applet: application: Fix crash when processing deferred
+- applet: application: Free libreport event configuration
+- applet: application: Tweak style
+- applet: application: Use GLib for logging
+- dbus: Remove session objects when owner disconnects
+- python-problem: Use org.freedesktop.Problems2
+- Remove references to libreport Red Hat support integration
+- gitignore: Add abrt_ccpp.catalog
+- plugins: sosreport_event: Rename nfsserver plugin
+- oops-utils: Better list iteration pattern
+- oops-utils: Add an assertion
+- a-dump-journal-core: Fix type mismatch and compariso
+- rpm: Prevent null pointer dereference
+- retrace-client: Make code style more consistent
+- retrace-client: Don't check array for NULL
+- dbus: Duplicate string passed to abrt_p2_object_new()
+- github: check: Upload test log on failure
+- github: check: Pass --load-average to make
+- Add GitHub Actions workflow for building PRs
+- applet: application: Fix style
+- abrt-server: Fix double free and possible leaks
+- Use g_autoptr where possible
+- Remove GHashTable aliases
+- Use g_autofree where possible
+- Replace libreport_replace_map_string_item with g_hash_table_replace
+- Replace libreport_next_map_string_iter with g_hash_table_iter_next
+- Replace libreport_remove_map_string_item with g_hash_table_remove
+- Replace libreport_get_map_string_item_or_NULL with g_hash_table_lookup
+- Replace libreport_init_map_string_iter with g_hash_table_iter_init
+- Replace libreport_get_map_string_item_or_empty with g_hash_table_lookup
+- Replace libreport_free_map_string with g_hash_table_destroy
+- Replace libreport_new_map_string with g_hash_table_new_full
+- Replace libreport_xsetenv with g_setenv
+- Replace libreport_xstat with g_stat
+- Replace libreport_xpipe with g_unix_open_pipe
+- Replace libreport_xchdir with g_chdir
+- Replace libreport_concat_path_file with g_build_filename
+- Replace strbuf with GString
+- Replace libreport_prefixcmp with g_str_has_prefix
+- Replace g_malloc with g_new for structs
+- Replace libreport_xunlink with g_unlink
+- Replace libreport_xopen with g_open
+- Replace libreport_xzalloc with g_malloc0
+- Replace libreport_xrealloc with g_realloc
+- Replace libreport_xmalloc with g_malloc
+- Replace libreport_xatou with g_ascii_strtoull
+- Replace libreport_xatoi_positive with g_ascii_strtoull
+- Replace libreport_xatoi with g_ascii_strtoll
+- Replace libreport_xstrndup with g_strndup
+- Replace libreport_xstrdup with g_strdup
+- Replace libreport_xasprintf with g_strdup_printf
+- init-scripts: Add directories to systemd-tmpfiles config
+- abrt-console-notification: Work around noclobber
+- abrt-console-notification: Swap redirects
+- dbus: service: Fix Crash() emission
+- runtests: mailx-reporting: Use a neutral time zone
+- abrt-action-install-debuginfo: Fix variable reference
+- runtests: bugzilla-comment-format: Quote path variables
+- runtests: bugzilla-dupe-search: Quote path variables
+- daemon: rpm: Use NEVRA instead of ENVRA
+- runtests: symlinks: Quote variables
+- doc: Clarify --insecure option a bit more
+- doc: Remove or replace some fedorahosted links
+- Drop creates-items tag from event definitions
+- dbus: Update dd_get_owner
+- abrtd: Drop unused variable
+- applet: Chain up in dispose()
+- applet: Pass instance pointer to signal handler
+- sosreport_event: Update plugin name
+- abrt-vmcore: Fix SyntaxWarning with python3.8
+- abrtd: Don't delete new problem dirs
+- abrt_get_backtrace: Move dir (un)locking to caller
+- abrtd: Fix typo in function name
+- make sure that former caches are group writable
+- remove old transition postscriptlet
+- setgid instead of setuid the abrt-action-install-debuginfo-to-abrt-cache [RHBZ 1796245]
+
+* Mon May 11 2020 Michal Fabik <mfabik@redhat.com> 2.14.2-1
+- auto-reporting: Fix missing libreport_ namespace
+- Update translations
+- github: coverity: Install dnf-plugins-core
+- applet: application: Don’t truncate command lines with spaces
+- applet: application: Enforce caller cleanup
+- applet: application: Use org.freedesktop.Problems2 API
+- applet: problem-info: Check component element
+- applet: problem-info: Move D-Bus loading code
+- applet: application: Don’t use g_application_get_default()
+- applet: application: Use g_list_free_full()
+- applet: problem-info: Destroy problem_data
+- applet: application: Use GPtrArray
+- applet: application: Properly split notification functions
+- applet: application: Drop show_problem_list_notification()
+- applet: application: Split off reporting from notifying
+- Fix spelling in documentation
+- github: coverity: Use Copr for libreport
+- Bump libreport dependency
+
+* Fri Apr 24 2020 Michal Fabik <mfabik@redhat.com> 2.14.1-1
+- Allow editing CHANGELOG.md before release commit
+- Remove libreport_ namespace from python code
+- dbus: Drop bogus dependency
+- dbus: Drop abrt_problems2
+- plugins: journal: Fix ci_mapping being overwritten
+- github: coverity: Upload build log
+- Drop libcap dependency
+- Update translations
+- Add namespace to libreport function and global names
+- github: coverity: Pass email address to web form
+- github: coverity: Actually compress cov-int
+- github: coverity: Install @rpm-development-tools
+- github: coverity: Do add-path in a separate step
+- github: coverity: Fix amending PATH
+- Revert "github: coverity: Run find on /tmp"
+- github: coverity: Run find on /tmp
+- github: coverity: Fix PATH
+- Revert "github: coverity: Specify path to cov-build"
+- github: coverity: Fix secret for uploading
+- github: coverity: Specify path to cov-build
+- Revert "github: coverity: Run find after extraction"
+- github: coverity: Run find after extraction
+- github: coverity: Make wget less verbose
+- github: coverity: Use secret properly
+- github: coverity: Install wget
+- github: coverity: Install intltool
+- dont-blame-interpret: Rename and redo
+- plugins: abrt-journal-core: Don’t assume anything about uid_t
+- github: coverity: Don’t pipe yes to autogen.sh
+- autogen.sh: Don’t prompt when installing dependencies
+- github: coverity: Just use autogen.sh sysdeps
+- libabrt: Rework function namespacing without #defines
+- github: coverity: Don’t run configure too early
+- autogen.sh: Handle NOCONFIGURE per the Build API
+- Drop Travis config
+- github: coverity: Install gettext-devel
+- cli: Correct debug directories in config
+- a-a-analyze-core: Remove useless comments, unused function
+- lib,plugins: Accomodate for multiple debug directories
+- github: Rename workflow
+- Set up GitHub Actions
+- .travis.yml: Update secret
+- README.md: Add Coverity badge
+- Add Travis CI config for Coverity builds
+- plugins: xorg-utils: Loopify parsing
+- plugins: xorg-utils: Shorten and explain condition
+- plugins: xorg-utils: Drop outdated comment
+- cli: Show defaults in help output
+- cli: Fix verbosity option
+- abrt-action-analyze-oops: Fix typo in translatable string
+- tests: Add perl, php R and tcl to dont-blame-interpret
+- a-a-save-package-data: Add R and tcl to interpreted langs
+- a-a-save-package-data: Use regexps to match interpreters
+- spec: Add %ghost for /var/run/abrt
+- cli: Fix descriptions for --since and --until
+
+* Fri Feb 07 2020 Ernestas Kulik <ekulik@redhat.com> 2.14.0-1
+- Makefile.am: Don’t pull translations from Zanata
+- README.md: Add Weblate badge
+- plugins: abrt-action-analyze-oops: Refactor code
+- lib: kernel: Simplify koops_extract_oopses() a bit
+- tests: lib: Add a function that gets the first crash
+- tests: Disable abrt-addon-upload-watch tests
+- tests: Replace old service command with beakers commands
+- dbus: Fix possibly uninitialized variable
+- bodhi: Initialize karma values with default
+- tests: Fix mailx-reporting tests
+- tests: Do not stop abrt-journal-core service
+- tests: Add short backtrace to CCpp crashes example
+- plugins: Add short backtrace to ccpp catalog messages
+- plugins: Bring back abrt_ccpp catalog to life
+- dbus: Warn about large number of problems
+- Fix build failure with gcc -fno-common
+- Update translations
+- Update abrt.pot
+- koops: Avoid explicit dependency on hash size
+- Update (uk) translation
+- Update (de) translation
+- Update (tr) translation
+- Update (sk) translation
+- Update (pt_BR) translation
+- Update (hu) translation
+- Update (fr) translation
+- Update (cs) translation
+- Update (bg) translation
+- Translated using Weblate (Polish)
+- Update translation files
+- Stop using parse_list
+- Move from nose to pytest
+- Use GChecksum to compute checksums
+- Drop scriptlets for abrt-ccpp.service
+- Remove translation skeletons
+- Add pot file
+- tests: skip-sosreport-dir: Add missing prepare
+- Update Makevars
+- tests: runtests: run: Remove redundant shell command
+- configure.ac: Fix indentation
+- Move augeas lenses to new subdirectory
+- Drop ChangeLog
+- Remove development scripts
+- events: Comment examples consistently
+- cli: Disambiguate --authenticate help string
+- cli: Print usage if option passed with no command
+- pull-trans: Suggest zanata install
+- shellcheck: Iterating over ls output is fragile. Use globs.
+- shellcheck: Double quote to prevent globbing and word splitting
+- zanata: Use python3 zanata client to pull translations
+- Bump GLib dependency version to >=2.55.1
+- python: Use correct paths for installed modules
+
+* Fri Oct 11 2019 Matěj Grabovský <mgrabovs@redhat.com> 2.13.0-1
+- cli: Use format argument in info command
+- cli: Make pretty and format mutually exclusive
+- cli: Set PYTHONPATH for tests
+- cli: Rework commands
+- Remove abrt-hook-ccpp
+- spec: Use macros where appropriate
+- tests: Use Augeas consistently
+- spec: Move config files to corresponding subpackages
+- build,spec: Empty config files in /etc/abrt/
+- doc: Update man pages and comments in config files
+- plugins: Update in-code defaults
+- doc: Correct alignment of heading underlines
+- a-dump-journal-core: Purge commented code
+- dbus: Remove D-Bus configuration service
+- Partly revert removal of default configs
+- cli: Tweak problem matching
+- plugins: Add satyr flags when building
+- cli: Fix warning
+- cli: Fix file name
+- cli: Use decorator for MATCH positional argument
+- cli: match: Iterate dict instead of calling keys()
+- cli: Make pylint happier about imports
+- cli: Drop unused variables
+- cli: utils: Use consistent return
+- cli: Improve i18n
+- cli: Drop humanize import
+- Drop uses of bind_textdomain_codeset()
+- gitignore: Update path to generated file after cli-ng move
+- tests: runner: Use systemctl instead of service
+- autogen.sh: Use autoreconf
+
+* Thu Aug 01 2019 Ernestas Kulik <ekulik@redhat.com> 2.12.2-1
+- Remove old CLI and move cli-ng subpackage files into tui subpackage
+
+* Wed Jul 03 2019 Martin Kutlak <mkutlak@redhat.com> 2.12.1-1
+- Translation updates
+- Rename all abrt-python to python3-abrt
+- spec: Get rid of python provides
+- hooks: abrt-hook-ccpp: Rename CreateCoreBacktrace setting
+- Update icon
+- non-fatal-mce: prepare oops1.test from template before using it
+- meaningful-logs: check relative counts of lines instead of absolute
+- oops-processing: fixed oops1.test handling. reworked so each oops has its own phase
+- dumpoops: make sure hostname matches in oops_full_hostname.test
+- Revert "applet: Add systemd service unit"
+- a-a-analyze-c: Fix segfault when saving function name
+- Fix grammar in implementation docs
+- doc: Update man pages and mention locations of config files
+- augeas,build,spec: Remove references to default configs
+- daemon,lib: Update default config according to abrt.conf
+- plugins: abrt-action-install-debuginfo: Replace uses of exit()
+- plugins: abrt-action-install-debuginfo: Catch BrokenPipeError
+- plugins: abrt-action-install-debuginfo: Remove unused imports
+- daemon: Check return value after reading from channel
+- spec: Require dbus-tools
+- daemon: Don't process crashes from unpackaged apps by default
+- plugins: abrt-action-install-debuginfo: Remove duplicate code
+- plugins: abrt-action-install-debuginfo: Remove variable
+- plugins: abrt-action-install-debuginfo: Remove comment
+- plugins: abrt-action-install-debuginfo: Remove dead assignment
+- doc: Fix spelling mistake in path to cache
+- doc: Update man page for abrt-handle-upload
+- doc: Update man page and help for a-a-install-debuginfo
+- Nuke Python 2 support
+- plugins: Catch unhandled exception in a-a-g-machine-id
+- plugins: retrace-client: Bail out if we can’t get a config
+- plugins: retrace-client: Default to HTTPS in RETRACE_SERVER_URI
+- plugins: analyze_RetraceServer: Fix default RETRACE_SERVER_URI
+- plugins: Fix name of env variable for retrace server
+- configure.ac: Add dependency on libcap
+- dbus: entry: Don’t claim truncation when there was none
+- applet: Add systemd service unit
+- spec: Remove obsolete scriptlets
+- Makefile.am: Use correct locale when getting date
+
+* Sat Feb 02 2019 Ernestas Kulik <ekulik@redhat.com> - 2.12.0-1
+- Update to 2.12.0
+
+* Tue Jan 08 2019 Matej Marusak <mmarusak@redhat.com> 2.11.1-1
+- Translation updates
+- Update CHANGELOG.md
+- a-a-install-debuginfo: Clean cache if we need space
+- shellcheck: Use command instead of type
+- shellcheck: Check exit code directly with if mycmd
+- shellcheck: Suppress shellcheck warning SC1090
+- shellcheck: Use $(...) instead of legacy backticked
+- cli: Add a shebang
+- applet: Port to GApplication/GNotification
+- spec: Add explicit package-version requirement of abrt-libs
+- Introduce pylintrc
+- augeas: Adjust testsuite to changes in libreport
+- signal_is_fatal: generate problem reports for SIGSYS
+- plugins: retrace-client: Port to libsoup
+- plugins: retrace-client: Fix copy-paste error
+- revert: spec: disable addon-vmcore on aarch64
+- spec: turn on --enable-native-unwinder aarch64
+- configure: Replace sphinx-build check with sphinx-build-3
+- a-a-c-o-f-hw-error: Check systemd-journal for MCE logs
+- koops: Filter kernel oopses based on logged hostname
+- add hostname BR for tests
+- add new prepare-data to dist files
+- fix tests names for dist target after making templates from them
+- fix for MCE events: Bug 1613182 - abrt-cli ignores rsyslog host info and incorrectly assumes that the receiving host had a problem
+- dbus: Add configuration for Python3
+- Add . to etc
+
+* Mon Oct 08 2018 Martin Kutlak <mkutlak@redhat.com> 2.11.0-1
+- Translation updates
+- configure.ac: fix augparse typo
+- plugins: Allow abrt-retrace-client to be optional at build time
+- spec: Build python*-abrt-addon packages as noarch
+- daemon: Fix double closed fd race condition
+- gui: Replace deprecated g_type_class_add_private
+- harvest_vmcore: Fix missing argument error during delete_and_close()
+- sosreport: plugin "general" split into two new plugins
+- plugins: Replace vfork with posix_spawn
+- defattr is not needed since rpm 4.2
+- python_sitearch -> python2_sitearch
+- lib: Correct the syntax for gdb backtrace command
+- gui-config: Remove deprecated GTK functions
+- spec: remove duplicated python3-devel
+- abrtd.service: force abrt-dbus to load changes from conf
+- ccpp: add %h and %e parameter into abrt-hook-ccpp
+- spec: set PYTHON variable because of ./py-compile
+
+* Thu May 31 2018 Matej Marusak <mmarusak@redhat.com> 2.10.10-1
+- Translation updates
+- Changelog: Update changelog
+- Remove dependency on deprecated nss-pem
+- spec: abrt do not require python2
+- spec: abrt-addon-ccpp do not require python2
+- spec: drop python2-abrt-addon requires
+- spec: fix bugs in python requires
+- cores: comment an unclearing statement
+- cores: print to stdout
+- cores: read all journal files
+
+* Fri Apr 27 2018 Matej Habrnal <mhabrnal@redhat.com> 2.10.9-1
+- build: conditionalize the Python2 and Python3
+- cli-ng,hooks,python-problem: Allow python to be optional at build time
+- spec: fix ambiguous Python 2 dependency declarations
+- plugins: a-a-g-machine-id use dmidecode command
+- spec: use dmidecode instead of python3-dmidecode
+- hooks: use container-exception-logger tool
+- spec: container python hooks require cel
+- hooks: do not write any additional logs
+- a-a-s-package-data: add python3.7 to known Interpreters
+- autogen: ignore abrt's python packages
+- correctly parse buildrequires from spec file
+
+* Wed Mar 21 2018 Matej Habrnal <mhabrnal@redhat.com> 2.10.8-1
+- Translation updates
+- spec: use Python3 as default in abrt-cli-ng
+- cli-ng: use Python3 as default
+- Add a new element 'interpreter' for python problems
+- retrace-client: Require nss-pem
+
+* Mon Feb 26 2018 Matej Habrnal <mhabrnal@redhat.com> 2.10.7-1
+- Translation updates
+- hooks: introduce docker hook for Python2
+- hook: add type to Python3 container exception handler
+- spec: introduce docker hook for Python2
+- Add ABRT hexa stickers
+- a-container-logger: workaround permission issue in minishift
+
+* Mon Feb 19 2018 Matej Habrnal <mhabrnal@redhat.com> 2.10.6-1
+- Translation updates
+- hooks: introduce docker hook for Python3
+- spec: introduce Python3 hook for container
+- Remove deprecated is_error macro
+- ldconfig is not needed in rawhide
+- remove python_sitearch macro
+- remove python_site macro
+- move BuildRequires to top
+- remove systemd-units and replace it with systemd macro
+- remove init.d services
+- a-h-event: Do not deduplicate different containers
+- rpm: include epocho in package element if > 0
+
+* Thu Nov 02 2017 Julius Milan <jmilan@redhat.com> 2.10.5-1
+- Translation updates
+- a-action-ureport: add option 'ProcessUnpackaged'
+- spec: change dependency on python{2,3}-gobject
+- applet: Additional changes to allow optional polkit
+- doc: remove obsolete doxygen tags
+- dbus: Additional changes to allow optional polkit
+- cli-ng: Explicitly state python version in shebangs
+- spec: rename python binary packages
+- a-d-journal-core: Save mountinfo from journal
+- a-d-journal-core: Save container cmdline
+- logging: rename omitted log() to log_warning()
+
+* Mon Aug 28 2017 Matej Habrnal <mhabrnal@redhat.com> 2.10.4-1
+- Translation updates
+- logging: rename log() to log_warning()
+- Quick hack to fix build with rpm >= 4.14
+- tests: Crash different binary in infinite event loop
+- tests: Revert not sufficient fix
+- tests: Reflect field changes in reporter-s-journal
+- tests: Get docker-inspect while container is running
+- cli,dbus: Allow polkit to be optional at build time
+- spec: add dependency for python{3}-gobject
+- a-d-journal-core: fix bad condition in creating reason msg
+- a-d-journal-core: use pid of crashed process in dumpdir name
+- changelog: update CHANGELOG.md
+
+* Thu Jun 15 2017 Martin Kutlak <mkutlak@redhat.com> 2.10.3-1
+- Translation updates
+- applet: add a default action to a notification
+- spec: require libreport-plugin-systemd-journal on Fedoras
+- changing load location from bin to libexec
+- changing location of abrt-action-save-container-data from bin to libexec
+- koops: Improve not-reportable for oopses with taint flags
+- This fixes #1173
+- python: provide more information about exception
+- abrt-journal: adapt to suspicious blacklist addition
+- koops: add suspicious strings blacklist
+- build: fix changelog adding in release target
+- changelog: update CHANGELOG.md
+
+* Tue Apr 25 2017 Matej Habrnal <mhabrnal@redhat.com> 2.10.2-1
+- Translation updates
+- spec: introduce migration to abrt-journal-core
+- abrt_event: Save cpuinfo in problem directories
+- koops: Improve fatal MCE check when dumping backtrace
+- lib: typo in header
+- Spelling fixes
+- Python 3.6 invalid escape sequence deprecation fix
+- koops_event: add check to restrict reporting of MCEs
+
+* Thu Mar 16 2017 Matej Habrnal <mhabrnal@redhat.com> 2.10.1-1
+- changelog: update CHANGELOG.md
+- build: create tarball in release-* target
+- spec: sosreport is not a package
+- Fix Typo
+- bodhi: Remove dependency on hawkey
+- spec: Remove dependency on hawkey
+- build: do not upload tarball to fedorahosted.org
+- spec: do not use fedorahosted.org as source
+- spec: install new plugins
+- plugins: introduce Machine ID and SOS report
+- Update CHANGELOG.md
+- build: fix generating list of dependences in autogen.sh
+- spec: start abrt-journal-core instead of abrt-ccpp
+- build: fix scratch-build target
+- a-a-ureport: fix calling of run_event_on_problem_dir
+- spec: if using systemd, default to os-release ID for desktopvendor
+- kernel: modify suspicious string "invalid opcode:"
+- daemon: Allow rpm to be optional at build time
+- spec: allow any compression of man pages
+- spec: remove defattr
+- spec: remove cleaning buildroot
+- spec: use versioned provides
+- spec: remove changelog entries older than 2 years
+- remove Buildroot and Groups tags
+- spec: recommend libreport-plugin-systemd-journal on Fedoras
+- doc: document selinux change needed for automatic deletion of reports
+- ccpp: tell gdb to analyze saved binary image
+
+* Sat Dec 03 2016 Jakub Filak <jakub@thefilaks.net> 2.10.0-1
+- Translation updates
+- spec: bump required libreport and satyr versions
+- build: make the release-* targets smarter
+- Add CHANGELOG.md
+- a-a-notify: set env var before run report_systemd-journal event
+- use run_event_on_problem_dir() helper for running events
+- notify: do not require package element
+- spec: add catalog_journal_ccpp_format.conf file
+- reporter-s-journal: add formatting file for abrt-journal-core analyser
+- cli-ng: fix --fmt parameter
+- python: create analyzer element in dumpdir
+- abrt-action-list-dsos: fix typo in vendor variable name
+- cli-ng: chown problem before reporting
+- lib: stop printing out a debug message 'adding: '
+- cli: print out the not-reportable reason
+- cli: configure libreport to ignore not-reportable
+- cli-ng: force reporting even if not-reportable
+- cli-ng: introduce verbose argument
+- Import GObject from gi.repository
+- ccpp: configure package repositories for correct OS
+- a-a-s-c-data: adapt to current docker
+- daemon: don't drop problems from unknown containers
+- a-a-s-c-data: correct detection of container type
+- spec: install Bodhi event files
+- bodhi: factor out Bodhi updates lookup into a solo event
+- problems2: update the documentation
+- a-a-analyze-python: create exception_type element
+- a-a-analyze-xorg: create crash_function into dump dir
+- koops: create crash_function element
+- a-a-analyze-python: create crash_function element
+- a-a-analyze-c: create crash_function element
+- spec: add formatting files for reporter-systemd-journal
+- reporter-systemd-journal: add formatting files
+- vmcore: /var/tmp/abrt is no longer a dump location
+- events: add event report_systemd-journal to all addons
+- abrt-action-notify: notify to systemd journal
+- spec: add abrt's catalog source files
+- journal-catalog: add abrt's catalog source files
+- ccpp: retain partial core_backtrace upon error
+- ccpp: log waitpid errors
+- ccpp: inform users about not supported unwinding
+- ccpp: close stdin when we can let the process die
+- daemon: properly shutdown socket connection
+- daemon: close forgotten FD to /proc/[pid]
+- ccpp: pass proc pid FD instead of pid to *_at fns
+- ccpp+daemon: pass valid params to dd_open_item()
+- python: remove unused functions from sysexcept hook
+- build: add gettext-devel to sysdeps
+- spec: add libcap-devel to BRs of addon-ccpp
+- ccpp: avoid running elfutils under root
+- Add abrt-action-analyze-vulnerability to .gitignore
+- build: autoge.sh without args configures for debugging
+- conf: increase MaxCrashReportsSize to 5GiB
+- ccpp: fast dumping and abrt core limit
+- CI: make debugging easier with more log messages
+- doc: add a guide for ABRT hackers
+- vmcore: fix an undefined variable on error path
+- vmcore: read kdump.conf from an arbitrary location
+- ccpp: use libreport 'at' functions
+- ccpp: use abort() to exit in debug mode
+- python2: stop generating dso_list in the process
+- python: stop collecting ENVIRON in the process
+- abrtd: details of processes from different PID NS
+- abrtd: save interesting process details
+- a-a-s-package-data: add python3.6 to known Interpreters
+- spec: update gdb Requires
+- tree-wide: make path to GDB configurable
+- a-a-ureport: print out exit codes in verbose mode
+- daemon: stop replacing analyzer with type
+
+* Fri Sep 09 2016 Jakub Filak <jfilak@redhat.com> 2.9.0-1
+- spec: install abrt_dbus_event.conf
+- dbus: use Problems2 API in abrt-dbus
+- dbus: Problems2 API implementation
+- spec: install Problems2 interfaces
+- dbus-doc: rewrite the XML to Problems2
+- Fix memory leaks
+- lib: introdcue a function checking post-create name
+- abrtd: change HTTP response code for duplicate problems to 303
+- autogen: fix typo in usage help string
+- daemon: send base names from abrt-server to abrtd
+- lib: normalize slashes of configured paths
+- lib: make configuration paths alterable at runtime
+- Add generated CCpp.conf to .gitignore
+- abrt-bodhi: use CCpp PackageManager configuration directive from configure
+- cli: introduce unsafe reporting for not-reporable problems
+- handle-event: stop creating post-create lock
+- daemon: trigger dump location cleanup after detection
+- hook-ccpp: dump own core file in debug mode
+
+* Mon Jul 18 2016 Matej Habrnal <mhabrnal@redhat.com> 2.8.2-1
+- Translation updates
+- abrt-hook-ccpp: Fix mismatching argument
+- Allow selinux to be optional at build time
+- vmcore: use findmnt to get mountpoint
+- spec: add utils-linux to vmcore's Require
+- vmcore: fix finding partitions by UUID and LABEL
+- a-a-install-debuginfo: Exception may not have an argument errno
+- koops: do not assume version has 3 levels
+- Add ARM specific oops backtrace processing.
+- examples: add oops-kernel-panic-hung-tasks-arm
+- Add oops processing for kernel panics caused by hung tasks.
+- abrt-hook-ccpp: save get_fsuid() return values in int variables
+
+* Wed May 25 2016 Matej Habrnal <mhabrnal@redhat.com> 2.8.1-1
+- a-dump-journal-xorg: allow *libexec/X* to be executable element
+- a-dump-journal-xorg: add '_COMM=gnome-shell' to journal filter
+- build: update pkg names for systemd
+- a-d-journal-core: save core dump bytes from the journal field
+- a-d-journal-core: support lz4 compressed core dump files
+- a-a-install-debuginfo: do not try to split None
+- doc: improve documentation of AllowedGroups, AllowedUsers and IgnoredPaths
+- testcase: add serial field to uReport check
+- a-a-install-debuginfo: correct handling of DebuginfoLocation
+- a-a-s-container-data: update docker container ID parser
+- abrt-hook-ccpp: drop saving of container env vars
+- a-console-notification: do not leak variables
+- a-retrace-client: format security
+- daemon: avoid infinite crash loops
+- spec: drop abrt-action-save-kernel-data bits
+- spec: README -> README.md
+- Add basic documentation
+- a-a-install-debuginfo: fix BrokenPipe error
+- a-a-install-debuginfo: make tmpdir variable global
+- python3 addon: workaround a bug in traceback
+- CCpp: turn off compat cores
+- a-a-save-package-data: blacklist /usr/lib(64)/firefox/plugin-container
+- Fix minor typo: possition -> position
+- translations: add missing new line
+- Translation updates
+- translations: update zanata configuration
+- ccpp: drop %e from the core_pattern
+- Save Vendor and GPG Fingerprint
+
+* Wed Feb 03 2016 Matej Habrnal <mhabrnal@redhat.com> 2.8.0-1
+- a-a-save-package-data: do not blacklist firefox
+
+* Tue Feb 02 2016 Matej Habrnal <mhabrnal@redhat.com> 2.7.2-1
+- ccpp: bug fix - undefined variables
+- a-a-c-o-f-hw-error: fix unicode error
+- ccpp: use error_msg_ignore_crash() instead of error_msg()
+- ccpp: add AllowedUsers and AllowedGroups feature
+- doc: fix formatting in abrt.conf man page
+- ccpp: use executable name from pid
+- a-a-c-o-f-hw-error: do not crash on invalid unicode
+- Use %s instead of %d.
+- configui: link GUI library with libabrt.so
+- Do not include system libabrt.h
+- ccpp: unify log message of ignored crashes
+- ccpp: add IgnoredPath option
+- lib: check_recent_crash_file do not produce error_msg
+
 * Mon Nov 23 2015 Jakub Filak <jfilak@redhat.com> 2.7.1-1
 - spec: switch owner of the dump location to 'root'
 - abrtd: switch owner of the dump location to 'root'
@@ -1448,1452 +1955,3 @@ killall abrt-dbus >/dev/null 2>&1 || :
 - console-notifications: use return instead of exit
 - Translation updates
 - a-a-s-p-d: add firefox on the package blacklist
-
-* Fri Oct 03 2014 Jakub Filak <jfilak@redhat.com> 2.3.0-1
-- applet: confirm ignoring of notifications
-- spec: disable addon-vmcore on aarch64
-- Allow to disable vmcore plugin
-- cli: batch reporting in abrt-cli
-- cli: add option remove crash dirs after reporting
-- dbus: fixed abrt-dbus memory leaks
-- spec: add abrt-action-generate-machine-id
-- plugins: add abrt-action-generate-machine-id
-- retrace-client: humanize sizes
-- cli: use portable syntax in abrt-console-notification
-- cli: robustize abrt-console-notification.sh
-- spec: remove dependency on crash from abrt-addon-vmcore
-- cli: make consistent commands in abrt-cli
-- retrace: respect Bugzilla event preferences
-- logging: less log messages for duplicates
-- dbus: don't ignore errors in verbose logging modes
-- a-a-s-p-data: reduce amount of error messages
-- a-h-event: don't spam system logs
-- applet: disable GDK deprecation warnings
-- koops: fix a use-after-free bug uncoverd by coverity
-- Revert "Support handling crashes in lxc containers"
-- json: include json.h accordingly to json-c CFLAGS
-- spec: hook abrt-oops.conf.5
-- oops: add man page
-- configure.ac: Fix json-c detection for json-c >= 0.11
-- gettext: fix the initialization in python scripts
-- xml: fix a typo in analyze_CCpp
-- spec: don't use native unwinder on arm arch
-- abrt-journal: fix includes
-- spec: add a build require item for systemd-journal
-- spec: add the journal oops stuff
-- koops: dump oopses from systemd-journal
-- use satyr with native unwider
-- python: support exceptions without traceback
-- update .gitignore
-
-* Tue Jul 08 2014 Jakub Filak <jfilak@redhat.com> 2.2.2-1
-- daemon: deal with missing 'executable' file
-- applet: chown each notified problem before reporting it
-- koops: don't analyze MCEs like standard oopses
-- koops: don't drop not-reportable oopses by default
-- abrt_event: fix post-create reporter-uploader examples
-- local duplicates must have matching executables
-- replace deprecated GTK3 functions
-- gdb: disable loading of auto-loaded files
-- dbus: Fix invalid dbus policy file
-- dbus: Fix desktop centric polkit policy file
-- configure: Support cross compiling with python3
-
-* Tue Apr 22 2014 Jakub Filak <jfilak@redhat.com> 2.2.1-1
-- bodhi: remove an extra semicolon after if stmt
-- stop using deprecated json-c functions
-- vmcore: start the service after kdump service
-- a-a-a-core: fix localization
-- do not clear LANG env variable
-- localization: fix gettext
-- Translation updates
-- configu UI: use glade file extension instead of ui
-- simplify Analyze C/C++ event configuration
-- Support handling crashes in lxc containers
-- spec: hook Kernel oops configuration files
-- koops: add an option controlling MCE detection
-- cli: list displays all problems
-- Fix a spelling error in a configuration GUI tooltip.
-- spec: python3 corrections
-- remove TODO entry from vmcore.conf
-- Fix new lines in po files
-
-* Wed Mar 05 2014 Jakub Filak <jfilak@redhat.com> 2.2.0-1
-- Translation updates
-- limit ourselves to *.conf in /etc/abrt
-- spec: remove stray space from %description
-- applet: run Autoreporting event in NONINTERACTIVE mode
-- ureport: add user to CC List of Bugzilla bug
-- spec: addon-python3 doesn't require addon-python
-- addon-python3 doesn't require addon-python
-- python: FsProxy uses notify_new_path
-- python: fix check for absolute path
-- spec: abrt-addon-python3
-- abrt-addon-python3
-- spec: python api for py3
-- python: build python api for py3
-- spec: add missing requires for python api
-- never search for MCE strings in dmesg
-- spec: add dependency on abrt-python
-- make dist: use tar-ustar due to long filenames
-- upload-watch: remove busy-wait for SIGUSR1
-- autogen: fix sysdeps parser
-- spec: abrt-python's files to arch specific dir
-- python: install modules to sitearch directory
-
-* Thu Jan 30 2014 Jakub Filak <jfilak@redhat.com> 2.1.12-1
-- don't break the event run by failures of abrt-action-notify
-- harvest-vmcore: properly handle inaccessible dir error
-- spec: abrt-cli requires a pkg providing workflows
-- applet: do not say the report is anonymous when ureport auth is enabled
-- abrtd.service: Don't order after syslog.target
-- MCE: make oops and vmcore MCEs a bit more similar
-- vmcore: properly configure Augeas
-- applet: don't notify missing ignored_problems file
-- fix a double free error in abrt-applet
-- configui: show 'Close' button in the dialog
-- configure: remove all -Werror from O0CFLAGS
-- MCE: cover cases where kernel version isn't detected on Fedora 20.
-- examples/mce2.test: an example of non-fatal MCE
-- doc/MCE_readme.txt: new file - documentation about MCE handling
-- oops post-create: do not fail the event if check-oops-for-hw-error exits nonzero
-- Add a manpage for abrt-action-check-oops-for-hw-error
-- abrt-action-check-oops-for-hw-error: i18n, add error check on open()
-- move MCE handling in event to abrt-action-check-oops-for-hw-error
-- Fix handling of Machine Check Exceptions.
-
-* Wed Jan 08 2014 Jakub Filak <jfilak@redhat.com> 2.1.11-1
-- Update translations
-- spec: add python-augeas to the requires
-- harvest_vmcore: replace regexp config parsing with augeas
-- spec: install python, vmcore and xorg conf ifaces
-- add configuration ifaces for python, xorg and vmcore
-- spec: install D-Bus Configuration files
-- introduce D-Bus Configuration Service
-- mark koopses with unsupporeted HW as not-reportable
-- cli: print autoreporting notification to stderr
-- make rpm: add $RPM_FLAGS aux variable
-- bodhi: use the right exit codes
-- abrt-handle-event: don't use already freed memory
-- spec: install abrt-auto-reporting files
-- introduce abrt-auto-reporting utility
-- abrt-action-notify: fix couple of flaws
-- Use satyr to compute koops duphash
-- koops: tweak koops parser for s390 Call Traces
-- configui: do not use deprecated gtk3 API
-
-* Wed Dec 11 2013 Jakub Filak <jfilak@redhat.com> 2.1.10-1
-- make: filter out useless msgs in chagelog gen alg
-- abrt-cli: display URL to reports in the details
-- abrt-cli list: list all problems by default
-- configure: libreport-web only with bodhi
-- Do not copy Makefiles to documentation.
-- Fix doc gen, making multilib test happy during packaging.
-- harvest_vmcore: Fix absolute path handling
-- Speed up journalctl --system support detection
-- Add build/ to POTFILES.skip
-- spec: add abrt's augeas module
-- add augeas module for abrt configuration files
-- spec: rename CCpp.conf
-- rename CCpp.conf man to abrt-CCpp.conf
-- spec: move vmcore addon's configuration to a new dir
-- vmcore: reorganize configuration
-- make: install abrt-harvest-vmcore into share conf.d
-- spec: install abrt-harvest-vmcore.conf to share conf.d
-- switch to libreport workflows in all report-cli events
-- abrtd: use warning level for "Recreating deleted ..." message
-- abrt-python: add missing arguments to Crash handler
-- spec: adapt recent changes related to abrt-action-notify
-- move the notify event from dbus_event.conf to abrt_event.conf
-- run the autoreporting event from abrt-action-notify
-- spec: install conf to /usr/share/abrt/conf.d
-- Load conf from /usr/share/abrt/conf.d and /etc/abrt
-- abrt-action-install-debuginfo: fix --exact handling. Fixes rhbz1027786
-- testsuite/dumpoops: do not test oops7.test on RHEL6
-- small improvement in Deployment Guide build machinery
-- Use bugzilla_formatdup.conf for detected duplicates in python too. Fixes rhbz#875312.
-- applet: properly handle incomplete problems
-- wrap check for incomplete problem in a function
-- applet: make build_message() more general
-- DBus Problems API: update documentation
-- spec: add abrt-action-notify
-- factor out D-Bus notification to a python script
-- adapt post_create event to the recent changes in reporter-ureport
-- spec: add Requires: systemd-python for python addon
-- shorten CCpp reason message
-- abrt-dump-oops: if backtrace is not seen, file an one-line oops. Fixes rhbz#812537
-- Fix false failure in nmi_oops_hash testcase
-- Update translations
-- Create manpage for gpg_keys.conf
-- Create manpage for CCpp.conf
-- Create manpage for python.conf
-- Add 11 manpages for *_event.conf.5, all refer to report_event.conf manpage
-- Create manpage for abrt-harvest-vmcore.conf
-- applet: use problem_data_t in ignored problems
-- ignored problems: add functions accepting problem_data_t
-
-* Sat Oct 26 2013 Jakub Filak <jfilak@redhat.com> 2.1.9-1
-- pyhook: add logging workaround for rhbz#1023041
-- spec: add systemd-python to BuildRequires
-- start abrt-handle-event in non-interactive mode
-- Log to journal instead of syslog
-- Create manpage for xorg.conf
-- Configuration UI: instantly apply changes
-- applet: reload user configuration before accessing its values
-- switch logging from syslog to systemd in f20 - rhbz#1010648
-- make notification messages more clear
-- Use log_ family instead of VERBn log calls
-- spec: unversioned doc directories in newer fedoras
-- don't consider crashes posted to ABRT server as reported
-- check return values of fcntl() and setsid()
-- remove a dead code uncovered by coverity
-- spec: fix file access rights for type and core_bactrace
-- spec: move examples to abrt-python-doc package
-- install problem examples to python dir
-- spec: added the versioned abrt-libs requires to silence rpmdiff
-- a-dump-oops: Add new WARNING pattern
-- a-a-save-kernel-data: support more kernel flavours
-- a-h-event: always compare results of realpath()
-
-* Fri Oct 04 2013 Jakub Filak <jfilak@redhat.com> 2.1.8-1
-- Disassemble only instruction rage memory if backtrace is too big
-- Include floating-point registers in the backtrace
-- spec: make addon-ccpp dependent on libreport-python
-- polkit: replace deprecated functions with their subtitues
-- retrace-client: query CCpp exploitable information from Retrace server; closes #703
-- GUI config: add support for Private ticket option
-- a-a-ureport: handle os errors gracefully rhbz#998428 rhbz#998197
-- add prefix from configure to the path of debuginfo installer - closes #701
-- spec: added deps on abrt-python - closes rhbz#1008182
-- spec: remove abrt-dedup-client; closes #702
-- remove abrt-dedup-client; related to #702
-- abrt-*-client: simplify formatting of locale-related headers
-
-* Wed Sep 11 2013 Jakub Filak <jfilak@redhat.com> 2.1.7-1
-- fix debuginfo installer expecting user input from a pipe - closes #696
-- add environment variable whitelist to debuginfo install wrapper - closes 692
-- add repo_pattern argument as a custom repository filter - closes #688
-- abrt-cli list: replace "@" prefix by "id " prefix
-- fix a crash in 'abrt-cli info' when short id isn't found
-- Use common string-to-sha1_hash functions. #694
-- doc: update OpenGPGCheck in a-a-save-package-data rhbz#997922
-- abrt-cli report: accept sha1 hashes of directory names. #693
-- abrt-dump-oops: emit a message if throttling for a significant period of time
-- abrt-gdb-exploitable: print current instruction
-- spec: posttrans scriptlet regenerating core_backtraces
-- abrt-handle-event: add check for missing crash thread
-- provide tmpfiles.d configuration
-- abrt-cli list: use sha1 hash as short ids instead of @N thing. rhbz#906733
-- vmcore: fail gracefully if dump_dir is not accessible
-- spec: vmcore: require kexec-tools
-- vmcore: use re.MULTILINE instead of numerical value
-- vmcore: don't fail if /etc/kdump.conf is not readable
-- abrt-cli info: add "-s SIZE" option. closes #689
-- fix noninteractive mode in debuginfo installer - rhbz#737066
-- fixed the gpg keys loading - closes #686
-- Fix type of OPT_BOOL's referenced flag variable - it must be int, not bool!
-- adds a kdump.conf parser to get the correct dump dir location, closes #640
-- xorg_event.conf: use abrt-action-list-dsos to create dso_list
-- abrt-action-list-dsos: extend it to be able to parse Xorg backtrace.
-- don't require debuginfo for vmcore analysis rhbz#768389
-- specfile: make addon-pstoreoops obsolete addon-uefioops
-- abrt-dump-oops: add -t option which slows down problem creation. rhbz#902398.
-- rename uefioops to pstoreoops rhbz#949721
-- spec: create type element for problem dirs where it doesn't exist - rhbz#958968
-- introduce abrt-upload-watch
-- fix ccpp hook to create the type element - closes #682
-- specfile: use systemd-rpm macros. rhbz#850019
-- abrt-harvest-vmcore: notify new path - #657
-- abrt-dump-oops: remove redundant g_list_length() call, make messages clearer
-- updated translation - rhbz#860555
-- updated transifex url
-- GUI config: add Close/Defaults button
-- GUI config: hide option descriptions in tool tips
-- GUI config: add Silent shortened reporting support
-- applet: silent shortened reporting
-- applet: less misleading label for Ignore button
-- abrt-handle-upload: switch from shell to python; send socket notification. #657
-- spec: add build requires for XSMP depencies
-- applet: update seen list when X Session dies
-- improved the error messages in abrt-server - closes #679
-- fix typo in abrt-config-widget.ui
-- spec: add new packages abrt-gui-libs and abrt-gui-devel
-- delete desktop file for system-config-abrt
-- expose abrt configuration GUI in public API
-- rewrite abrt-harvest-uefioops to python - closes #678
-- spec: abrt-python is no longer noarch - related #677
-- created python binding for notify_new_path - closes #677
-- spec: install applet's desktop file to system dir
-- applet: configure notification source
-- rewrite shell script for moving vmcores into python closes #676
-- abrtd: ensure that the dump location directory exists
-- a-a-ureport: generate core_backtrace only for CCpp problems
-- do not store potentially big data in /tmp
-- abrt-dbus: send new problem notify signal to socket
-- abrtd: remove "post-create" machinery. Related to #657
-- Avoid leaving stale rpmdb locks behind (rhbz#918184)
-- abrtd: improve parsing of pidfile in create_pidfile()
-- abrt-dump-{oops,xorg}: send new problem notify signal to socket
-- abrtd: disable inotify watch on DUMP_LOC
-- abrt-hook-ccpp: send "POST /creation_notification" after creating problem dir
-- Stop dying in check_free_space(); rename it to low_free_space()
-- abrt-server: make create_problem_dir() run "post-create"
-- abrt-handle-event: create DUMP_LOC/post-create.lock when running "post-create"
-- abrt-server: add support for "POST /creation_notification"
-- abrt-handle-event: free more of allocated data
-
-* Fri Jul 26 2013 Jakub Filak <jfilak@redhat.com> 2.1.6-1
-- replace functions deprecated in Gtk-3.10 with their substitutes
-- use shared GLib initialization function
-- a-a-g-c-b: Unwind using GDB
-- abrtd: fix on top of "prevent possible leak of malloced worst_dir"
-- testsuite: recognize uReport2
-- a-handle-event: check if satyr supports the analyzer
-- abrtd: prevent possible leak of malloced worst_dir
-- use absolute path in python shebang rhzb#987010
-- moved parse_list to the shared library in libreport - related to rhbz#803772
-- testsuite: do not require core_backtrace in koops problems
-- testsuite: update path to XML event config base dir
-- abrt-action-save-package-data: properly close rpm database. Closes #674.
-- abrt-action-save-package-data: fix handling of ProcessUnpackaged on scripts
-- blacklisted-script: new test
-- abrt-action-save-package-data manpage: typo fix
-- change /var/spool/abrt/ to /var/tmp/abrt rhbz#912750
-- Fix RPMdiff warnings about abrtd and abrt-action-install-debuginfo-to-abrt-cache
-- specfile: add dependency on abrt-libs to abrt-addon-uefioops
-- stop using the hardcoded event list, use workflows instead rhbz#866027
-- retrace-client: build correct release for Fedora Rawhide
-- spec: drop unnecessary Obsoletes and Provides
-- correct FSF address in python exception hook
-- spec: add manual pages to packages
-- add all missing manual pages
-- fix rpmlint issues in the spec file
-- move event option XML files to /usr/share/libreport/
-- spec: replace btparser with satyr
-- Update satyr support, drop btparser compatibility
-- abrt-hook-ccpp: always fall back to creating user core.
-- testsuite: fixed cli test closes #671
-- abrt-gdb-exploitable: comment-out dead code
-- spec: specify all conf files
-- abrt-gdb-exploitable: formatting
-- abrt-gdb-exploitable: improve signal analysis by looking at siginfo.si_code
-- abrt-gdb-exploitable: first cut of ppc support
-- abrt-gdb-exploitable: x86 factoring-out
-- dbus: add GetForeignProblems method
-- problem API: add function getting list of inaccessible problem IDs
-- the system tray icon opens recently detected problem
-- testsuite: fix abrt-python test to work on rhel6
-- testsuite: enable abrt-python test for rhel6
-- specfile: hook up vulnerability analyzer
-- Add gdb python plugin which analyzes coredump for vulnerability
-- applet: stop saving configuration at exit
-- spec: add system-config-abrt stuff
-- introduce system-config-abrt
-- move initialization of shortened reporting option to libabrt
-- abrt-cli status: fix the output
-- Fix wrong path in shell include
-- Make rhel6/python-addon test to test for old behaviour
-- tests/runtests/python-addon: check for "Python", not "pyhook"
-- abrt-dump-xorg: save "type=xorg" along with "analyzer=xorg"
-- Update python hook to use fixed socket interface
-- abrt-server: updates/fixes for future rasdaemon needs
-
-* Fri Jun 14 2013 Jakub Filak <jfilak@redhat.com> 2.1.5-1
-- spec: require tar closes #635
-- spec: tui should require abrt closes #633
-- a-d-oops: obtain kernel version from the oops
-- a-a-p-ccpp-analysis: import all used attributes
-- vmcore: provide all problem elements necessary for the reporting
-- a-d-oops: add 'update' command line argument
-- testsuite: disable GPG check for el7
-- testsuite: update URL used in emails
-- testsuite: use nat instead of bridge
-- testsuite: use virt-addr to get IP of a VM
-- spec: always make debuginfo cache setgid
-- testsuite: add test order for el7
-- spec: use /var/spool/abrt on Fedora < 18
-- a-a-g-core-backtrace: don't crash if kernel file doesn't exist
-- a-a-a-vmcore: save kernel version in 'kernel' file
-- spec: fix a syntax bug in conditional macro
-- tweak spec for openSUSE
-- be able to configure without bodhi
-- testsuite: fix race condition between D-Bus and runtes
-- abrt-cli: make status help message more precise
-- Move get_problem_dirs_for_element_in_time() to its only user, abrt-dbus
-- abrt-cli status: don't include reported problems into count
-- Move get_problems_count() to its only user - "abrt-cli status"
-- fix a minor issue in 'abrt-cli list' if statement
-- abrt-cli list: implement --since and --until
-- Make problem_api.c easier to comprehend
-- testsuite: collect files stored by beakerlibs rlBundleLogs
-- testsuite: dump package versions
-- abrt-python: open dirs read-only if possible
-- dbus: ChownProblemDir method really changes the owner
-- python: disable events in collision with anaconda
-- spec: abrt-python requires pygobject2
-- testsuite: fix test name
-- systemd units: start services only if it make sense
-- abrt-harvest-uefioops.in: test for abrtd after testing for pstore, not before
-- make abrt-uefioops.service conditional on /sys/fs/pstore being populated
-- testsuite: install abrt-python
-- testsuite: add test for abrt-python
-- dbus: fix SetElement failing when shrinking an item
-- spec: fix unowned directories
-- testsuite: cli-status cleanup
-- Fix make rpm for satyr builds
-- abrt-python: whole python API path in POTFILES.skip
-- abrt-python: fix dbus compatibility on RHEL6
-- abrt-python: check if gid equals current users gid
-- abrt-python: fix tests compatibility with python 2.6
-- abrt-python: pass DD_OPEN_READONLY only if available
-- abrt-python: fix deprecation warnings
-- console notification shouldn't ask confirmation - closes #652
-- Short BT deduplication false positives workaround
-- satyr-compat: treat bt distance as a float
-- Only problems of same type can be duplicates
-- make the console notifiacation code more robust - closes #649
-- abrt-python: fix bug in problem.get
-- abrt-python: pep8 cleanup
-- unittest: add test for <NMI> koops frame prefix
-- koops parse: support <NMI> frame prefix
-- don't show non critical errors in console notification
-- use last_occurrence with --since
-- abrtd.service: start after livesys.service
-- tests/runtests/uefioops: new test
-- specfile: hook up abrt-uefioops service
-- abrt-uefioops: new service
-- updated translation
-
-* Tue Apr 30 2013 Jakub Filak <jfilak@redhat.com> 2.1.4-1
-- spec: fix rpmlint errors for console-notification
-- fixed race in the console notification closes #643
-- Fix wrong comments. No code changes
-- testsuite: enabled cli-status test closes #642
-- testsuite: added tests for abrt-cli status
-- abrt-action-ureport: rewrite in python, improve messages
-- build abrtd and setuided executables with full relro rhbz#812284
-- spec: remove the commented macros rhbz#864851
-- minor fix to console notification #641
-- spec: added the versioned abrt-libs requires to silence rpmdiff rhbz#881123
-- trivial fix to console notification #641
-- spec: create a new subpackage for the console notification #641
-- added a console notification script to profile.d closes #641
-- added 'status' command to abrt-cli
-- factor out the problem querying functions from abrt-dbus to libabrt
-- rename problem_api.c -> problem_api_dbus.c
-- testsuite: release -> os_release
-- bodhi, retrace: support /etc/os-release
-- refactorize: reflect recent changes in map_string_t
-- abrtd: fix incomplete data not-reportable message typos
-- abrt-action-generate-core-backtrace: be a bit more verbose
-- abrtd: mark unprocessed dump directories as not-reportable
-- tests/runtests/ureport: fix test to expect exit code 70 instead of "THANKYOU" string
-- abrt-dump-oops: add "Machine Check Exception" to the list of watched strings rhbz#812537
-- Replace "THANKYOU" with EXIT_STOP_EVENT_RUN exit code (70)
-- Fix rhel6 version of verify-that-report-edits test
-- tests/runtests/verify-that-report-edits: add forgotten file
-- abrt-action-install-debuginfo: do not assume os.execvp never returns
-- abrtd: update last occurrence dump dir file
-- return the right exit code for user cancellation
-- add more examples to Problem API doc
-- fix incompatible translation lines ending
-- tests/runtests/upload-{ftp,scp}: fix the test to check for DIR.tar.gz
-- abrt-cli: make "report -v[vv]" export correct $ABRT_VERBOSE value
-- updated translation Related: #951416
-- tests/runtests/upload-filename: new test
-- spec: add deps. required for reporting to abrt-cli pkg
-- spec: inc required version of libreport
-
-* Wed Mar 27 2013 Jakub Filak <jfilak@redhat.com> 2.1.3-1
-- post-create: record runlevel (correct version w/o subshell)
-- post-create: record runlevel
-- testsuite: install libreport-plugin-rhtsupport
-- spec: integration with satyr
-- Integration with satyr
-- dbus: check correct errno after dump_dir_is_accessible_by_uid()
-- spec: require libreport workflow package acc. to OS type
-- tests/runtests/rhts-test: correct hints response, add log output
-- rhts-test: remove stray strace invocation
-- testsuite: install abrt-devel to testing machines
-- spec: remove the abrt-gui related: #629
-- remove the abrt-gui closes #629
-- retrace-client: do not allow space in os_release_id; closes #625
-- Remove all smolt-related files and code bits
-- Remove smolt-related parts of specfile
-- tests/runtests/rhts-test: add a test for -tCASE_NO
-- tests/runtests/rhts-test: add tests for reported_to and client output
-- tests/runtests/rhts-test: fix URLs in responses, add "attached ok" response
-- tests/runtests/rhts-test: new test
-- testsuite: add test for recreating /var/tmp/abrt when it's deleted
-- Update debug build scripts
-- testsuite: add tests for Java VM dump directories
-- abrtd: recreate Dump Location directory if it is delete
-
-* Tue Mar 19 2013 Jakub Filak <jfilak@redhat.com> 2.1.2-1
-- Show a confirmation notify bubble for reported problems in ShortenedReporting mode
-- Fix leaks in koops-parser unit tests
-- Add maintainer-check-valgrind make target
-- Add more unittests for ignored problem error paths
-- Get rid of 2 x dd_opendir() calls in ignored problems
-- ignored_problems: small optimization
-- Fix memory leaks in ignored problem helpers
-- added vmcore cli and gui events rhbz#921954
-- Add unit tests for ignored problem helpers
-- applet: mark problems as ignored and don't notify ignored problems
-- Introduce helpers for management of list of ignored problems
-- abrt-ccpp: try to read hs_err.log from crash's CWD
-- spec: added a-a-a-ccpp-local man page
-- created manpage for a-a-a-ccpp-local
-- testsuite: extend the logs with the list of prior crashes which caused test's failure
-- testsuite: add ureport validation test
-- added options to disable bugzilla and bodhi related to: rhbz#828673 rhbz#810309
-- abrt-action-perform-ccpp-analysis: Complain if analyze_RetraceServer can't run. Closes 619
-- autogen.sh: stop using bashisms
-- configure.ac: Fix wrong variable name
-- added option to bypass di install closes #618
-- abrt-gui: change URL to point to most recent doc
-- spec: added abrt-action-analyze-ccpp-local to ccpp-addon related to rhbz#759443
-- - analyze-ccpp don't suid to abrt when run as root, related rhbz#759443
-- Deployment Guide: expand helper scripts
-- convert_images_to_embedded_data.sh: trivial fix
-- Deployment Guide: add .xml files (hey were missed because of .gitignore)
-- abrtd: prohibit DumpLocation == WatchCrashdumpArchiveDir. Closes rhbz#854668
-- Deployment Guide: add convertor to single HTML file with embedded images
-- Small update of Deployment Guide machinery
-- a-a-ureport: don't fail on missing counter file
-- dbus doc: make xml interface parseable by qtdbusxml2cpp
-- README_deployment: extend a bit
-- Added doc/README_deployment and doc/deployment/*
-- update translation
-- add targets to makefile to ease the new release process
-- testsuite: append fatal failures to results file as well
-- a-a-ureport: allow to send ureport more than once
-- applet: remove confusing "Show" button
-- abrtd: Remove "Corrupted or bad directory" words from the message
-- testsuite: better handling of FATAL test failures
-- Whitespace fix. No code changes.
-- Improve log messages in cccpp hook and save-package-data. See rhbz#909617
-- testsuite: fail better
-- abrt-harvest-vmcore: don't copy dir from var/spool if copy already exists
-- add doxygen to BuildReqs
-- doc: fix doxygen complaints
-- doc: added doxygen support closes #525
-- abrt-python: fix makefiles
-- testsuite: added dont-blame-interpret test closes#609
-- don't blame interpreter, blame the running script #609
-- fix path in the collect_xsession_errors event
-- spec: fix systemd service removal in %preun
-- testsuite: fix upload path for rawhide vm
-- testsuite: add mac address list
-- applet: pass problem's id to the gui app
-- applet: don't parse dd's time on its own
-- testsuite: provide some uuids to avoid unwated duplicates detection
-- a-a-p-ccpp-analysis: use default run_event logging function
-- retrace-client: print dots instead of repeated status message
-- dbus: add more debugging logs
-- move abrt.pth to arch specific location rhbz#912540
-- testsuite: provide an uuid to avoid unwanted duplicate detection
-- testsuite: rename a test user to avoid colissions with previous test
-- abrt-retrace-client: improve error messages
-- dbus: add basics to a new problem
-- doc: install abrt-dbus documentation files to the correct places
-- doc: extend the documentation of DBus API
-- testsuite: add selinux-policy to DontMatchComponents list in bugzilla.conf
-- testsuite: update bugzilla responses
-- autogen: add function which installs dependencies (works on Fedora)
-- Make forking code paths more robust.
-- testsuite: clean metadata *before* reinstallation
-- testsuite: clean metadata before updating
-- add more logging to catch "stuck core-backtrace" problem; reduce gdb looping
-
-* Thu Feb 07 2013 Jakub Filak <jfilak@redhat.com> 2.1.1-1
-- ccpp_event: pass a list of build ids through pipe instead of file
-- rpm: add SETGID bit on a-a-i-d-i-t-a-cache executable
-- abrt-destkop package requires libreport-fedora package
-- abrt-dump-{oops,xorg}: limit amount of created dirs, add cooldown sleep if exceeded
-- Merge branch 'master' of github.com:abrt/abrt
-- abrt-watch-log: handle a case when child doesn't process its input
-- abrt-watch-log: fix a bug in mmap error check
-- abrt-action-analyze-xorg: fix the case with DIR != "."
-
-* Mon Feb 04 2013 Jakub Filak <jfilak@redhat.com> 2.1.0-1
-- testsuite: replace hardcoded dump location by variable
-- pkg-config: export defaultdumplocation variable
-- rpm: preserve old configuration for F17< and REHL7<
-- configure: set default dump location to /var/tmp/abrt
-- abrtd: sanitize mode and ovner of all elements
-- updated translation
-- abrtd-inotify-flood test: expend it to check for another inotify-related bug
-- applet: on requrest open gnome-abrt instead of abrt-gui
-- Make it so that g_io_channel_read_chars(channel_inotify) does not buffer data.
-- multilib fixes
-- daemon: unify accessibility check before delete with dbus
-- dbus: move dir accessibility check from abrt to libreport
-- dbus: user dd_chown instead of own impl.
-- testsuite: run report-cli in non-interactive mode and look for correct string
-- allow default dump directory to be configured through cmd line args
-- abrt-python: import dbus lazily
-- abrt-python: add missing file
-- abrt-python: add DEFAULT_DUMP_LOCATION to config
-- abrt-python: fix list_all to return meaningful results
-- abrt-python: use filesystem proxy as a fallback
-- abrt-python: use /var/tmp/abrt by default
-- abrt-python: skip non-accessible directories
-- abrt-python: minor test updates
-- abrt-python: add missing watch examples
-- abrt-python: add new problem notification support
-- abrt-python: add debugging message for dbus calls
-- abrt-python: DeleteProblem takes list of problems
-- abrt-python: add support for dump dir access
-- abrt-python: force string for dbus set item
-- abrt-python: add test executable
-- abrt-python: fix tests not cleaning after themselves
-- abrt-python: add python-nose to buildrequires
-- abrt-python: add abrt-python package
-- abrt-python: cover python-problem by autotools
-- abrt-python: add python-problem tests to POTFILES.skip
-- abrt-python: add documentation build dir to .gitignore
-- abrt-python: rename to abrt-python
-- abrt-python: fix each test to run standalone
-- abrt-python: initial
-- testsuite: added symlink test to test list
-- testsuite: added test for symlink handling rhbz#895442
-- reporter-bz: post a comment to dup bug, if we found a dup. version 2.
-- testsuite: add rhel6 specific tests for CLI
-- replace left over magic dd modes by macro
-- synchronize default dump dir mode with libreport
-- replace all occurrences of hardcoded dump location by a variable
-- harvest-vmcore: read dump dir path from configuration
-- use lchown when chowning files over dbus
-- use lchown when chowning newly created problem directory
-- verify-that-report-edits test: fix to account for new CLI interface
-- localized-reporting test: fix breakage
-- localized-reporting: tweak it to work with new cli interface
-- Fix cli-sanity failures with new CLI
-- koops: add all x86 TRAP prefixes to list of suspicious strings
-- koops: put all suspicious strings to global variable
-- applet: extend comment. No code changes
-- applet: introduce shortened reporting
-- abrt-applet: handle SIGTERM and perform nice termination
-- abrt-applet: update the seen list on every possible action
-- applet: don't notify outdated new problems
-- Add and use "report-cli" event instead of removed "report-cli -r" option
-- fixed the relro flags rhbz#812284
-- applet: unref unused GIOChannel
-
-* Wed Nov 14 2012 Jakub Filak <jfilak@redhat.com> 2.0.19-1
-- call g_type_init() only in GLib version < 2.35
-- plugins/*_event.conf: use reporter-bz -F FMTFILE as appropriate
-- don't leak optional retrace path
-- repeat unchaged retrace status message only in verbose mode
-- check the correct return value of yesforever answer
-- abrt-handle-event: forward event process requests to parrent
-- testsuite: enhance koops parser unit tests
-- don't leak kernel tainted string
-- enhance koops tainted flag parser
-- testsuite: remove crash dir in socket-api
-- Use "comment" element instead of "description"
-- testsuite: fixed a copy&paste bug in bt-dupe-search
-- tests/runtests/bugzilla-dupe-search: fix false positive
-
-* Thu Nov 01 2012 Jakub Filak <jfilak@redhat.com> 2.0.18-1
-- tests/runtests/bugzilla-dupe-search: fix false positive
-- tests/runtests/bugzilla-bt-reattach: further fixes for changed bz reporter
-- tests/runtests/bugzilla-bt-reattach: further fixes for changed bz reporter
-- tests/runtests/bugzilla-bt-reattach: change to account for differen behavior in new reporter-bz
-- bugzilla-dupe-search: fix os_release to contain the same OS version as bug 755535
-- Do not stop reporting when GConf entry is not found. Closes rhbz#869833
-- Fix false positive caused by English language fix
-- import inspect lazily
-
-* Wed Oct 24 2012 Jakub Filak <jfilak@redhat.com> 2.0.17-1
-- provide a problem item containing versions of binaries listed in Xorg backtrace
-- import rpm lazily
-
-* Wed Oct 17 2012 Jakub Filak <jfilak@redhat.com> 2.0.16-1
-- xorg_event: make post-create save dmesg, drop problems w/ binary modules
-- collect_xsession_errors should not fail if !xsession-errors. Closes rhbz#866698
-- testsuite: updated the url for F18 nightlies
-
-* Thu Oct 11 2012 Jakub Filak <jfilak@redhat.com> 2.0.15-1
-- add collect_* event to reporting chains for CCpp/Python/Kernel
-- testsuite: fixed url for the F18 nightly
-- core-backtrace: make sure kernel version does not contain spaces
-- core-backtrace: also include '?' flag for kerneloops
-- don't check EXECUTABLE if it isn't present in list
-- testsuite: rename oops_processing to oops-processing
-- testsuite: remove examples.tar from oops_processing test
-- testsuite: remove examples.tar from dumpoos dir
-- fix up oops1.{test,right} to not hash '' string (we don't allow that anymore)
-- retrace-client: check whether all included files are regular
-- abrt_exception_handler.py: save 'environ' element
-- add Makefile target release-fix
-- Make it possible for developer to disable crash processing for specific apps. Closes rhbz#848786
-- s/Dump directory/Problem directory/
-
-* Wed Mar 16 2011 Jiri Moskovcak <jmoskovc@redhat.com> 2.0.0-1
-- update to the latest upstream version
-- many improvements
-- FIXME: add closed bugzillas
-
-* Fri Feb 18 2011 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.17-2
-- removed gnome-python2-vfs dependency
-
-* Mon Feb 07 2011 Fedora Release Engineering <rel-eng@lists.fedoraproject.org> - 1.1.17-1.1
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_15_Mass_Rebuild
-
-* Sat Feb 05 2011 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.17-1
-- rewritten abrt-debuginfo-install script to use the yum API
-- GUI: added search box to backtrace view rhbz#612017 (jmoskovc@redhat.com)
-- fixed some gui warnings rhbz#671488 (jmoskovc@redhat.com)
-- btparser/dupechecker improvements:
-  - Better handling of glibc architecture-specific functions (kklic@redhat.com)
-  - support format of thread header: "Thread 8 (LWP 6357):" (kklic@redhat.com)
-
-* Fri Feb 04 2011 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.16-1
-- rhtsupport: added list of attachments to comment rhbz#668875
-- rhtsupport: stop consuming non-standard header rhbz#670492
-- Resolves: #670492, #668875
-
-* Wed Jan 19 2011 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.15-2
-- add a gui/uid to useradd/groupadd command (reserved in setup rhbz#670231)
-- Resolves: #650975
-
-* Wed Jan 19 2011 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.15-1
-- removed unused files (jmoskovc@redhat.com)
-- update po files (jmoskovc@redhat.com)
-- removed some unused files (jmoskovc@redhat.com)
-- pass old pattern to ccpp hook and use it (dvlasenk@redhat.com)
-- GUI: added warning when gnome-keyring can't be accessed rhbz#576866 (jmoskovc@redhat.com)
-- 666893 - Unable to make sense of XML-RPC response from server (npajkovs@redhat.com)
-- PyHook: ignore SystemExit exception rhbz#636913 (jmoskovc@redhat.com)
-- 665405 - ABRT's usage of sos does not grab /var/log/messages (npajkovs@redhat.com)
-- add a note in report if kernel is tainted (npajkovs@redhat.com)
-- KerneloopsScanner.cpp: make a room for NULL byte (npajkovs@redhat.com)
-- fix multicharacter warring (npajkovs@redhat.com)
-- open help page instead of about rhbz#666267
-
-* Wed Jan 19 2011 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.14-3
-- fixed build with rpm 4.9 (thx panu pmatilai for the patch)
-
-* Wed Jan 19 2011 Matthias Clasen <mclasen@redhat.com> 1.1.14-2
-- Rebuild against new rpm
-
-* Wed Nov 17 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.14-1
-- made howto mandatory
-- fixed segv in abrt-hook-ccpp rhbz#652338
-- added warning if kernel was tainted
-- make the "install debuginfo" hint selectable rhbz#644343
-- wrap howto and comments rhbz#625237
-- wrap lines in the backtrace window rhbz#625232
-- changed '*' to '•' rhbz#625236
-- make the bt viewer not-editable rhbz#621871
-- removed unneeded patches
-
-* Wed Nov 10 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.13-3
-- Rebuild for libnotify-0.7
-
-* Wed Aug 25 2010 Jochen Schmitt <Jochen herr-schmitt de> 1.1.13-2
-- Rebuild for python-2.7
-
-* Tue Aug 10 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.13-1
-- updated translation
-- added native systemd file rhbz#617316 (jmoskovc@redhat.com)
-- added ar to LINGUAS (jmoskovc@redhat.com)
-- made /etc/abrt/plugins/Bugzilla.conf world-readable again (jmoskovc@redhat.com)
-- l10n: adding fa locale (lashar@fedoraproject.org)
-- l10n: new Persian (lashar@fedoraproject.org)
-- remove libzip code (npajkovs@redhat.com)
-- add libxml-2.0 into configure (npajkovs@redhat.com)
-- fixed typo in man page rhbz#610748 (jmoskovc@redhat.com)
-- RHTSupport: GUI's SSLVerify checkbox had one missing bit of code (vda.linux@googlemail.com)
-- abrt_curl: discard headers from HTTP redirection (vda.linux@googlemail.com)
-- moved abrt.socket and abrtd.lock into /var/run/abrt making selinux happy (jmoskovc@redhat.com)
-- Mention --info and --backtrace in the abrt-cli man page. (kklic@redhat.com)
-- build fixes for gcc 4.5 (jmoskovc@redhat.com)
-- abrt-hook-ccpp: small fixes prompted by testing on RHEL5 (vda.linux@googlemail.com)
-- Added --info action to abrt-cli (mtoman@redhat.com)
-- wire up SSLVerify in RHTSupport.conf to actually have the desired effect (vda.linux@googlemail.com)
-- fixed tooltip localization rhbz#574693 (jmoskovc@redhat.com)
-- dumpoops/KerneloopsScanner: add pid to crashdump name (vda.linux@googlemail.com)
-- A message change suggested by dhensley (kklic@redhat.com)
-
-* Tue Jul 27 2010 David Malcolm <dmalcolm@redhat.com> - 1.1.10-4
-- rebuild
-
-* Tue Jul 27 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.10-3
-- blacklist /usr/bin/nspluginviewer
-
-* Mon Jul 26 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.10-2
-- minor build fixes
-
-* Mon Jul 26 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.10-1
-- blacklisted mono-core package
-- die with an error message if the database plugin is not accessible when needed (kklic@redhat.com)
-- change RHTSupport URL protocol from HTTP to HTTPS (dvlasenk@redhat.com)
-- the Logger plugin returns a message as the result of Report() call instead of a file URL (kklic@redhat.com)
-- Cut off prelink suffixes from executable name if any (mtoman@redhat.com)
-- CCpp: abrt-debuginfo-install output lines can be long, accomodate them (dvlasenk@redhat.com)
-- do not pop up message on crash if the same crash is the same (dvlasenk@redhat.com)
-- fedora bugs do not depend on rhel bugs (npajkovs@redhat.com)
-- GUI: fixed problem with no gkeyring and just one reporter enabled rhbz#612457 (jmoskovc@redhat.com)
-- added a document about interpreted language integration (kklic@redhat.com)
-- moved devel header files to inc/ and included them in -devel package (jmoskovc@redhat.com, npajkovs@redhat.com)
-- renamed abrt-utils.pc to abrt.pc (jmoskovc@redhat.com)
-- string updates based on a UI text review (kklic@redhat.com)
-- rhtsupport obsoletes the old rh plugins (jmoskovc@redhat.com)
-- list allowed items in RHTSupport.conf (kklic@redhat.com)
-- GUI: fixed package name in warning message when the packge is kernel rhbz#612191 (jmoskovc@redhat.com)
-- remove rating for python crashes (jmoskovc@redhat.com)
-- CCpp: give zero rating to an empty backtrace (jmoskovc@redhat.com)
-- GUI: allow sending crashes without rating (jmoskovc@redhat.com)
-- RHTSupport: set default URL to api.access.redhat.com/rs (dvlasenk@redhat.com)
-- abort initialization on abrt.conf parsing errors (dvlasenk@redhat.com)
-- changing NoSSLVerify to SSLVerify in bugzilla plugin (mtoman@redhat.com)
-- added rating to python crashes
-- show hostname in cli (kklic@redhat.com)
-- updated po files (jmoskovc@redhat.com)
-- added support for package specific actions rhbz#606917 (jmoskovc@redhat.com)
-- renamed TicketUploader to ReportUploader (jmoskovc@redhat.com)
-- bad hostnames on remote crashes (npajkovs@redhat.com)
-- unlimited MaxCrashReportsSize (npajkovs@redhat.com)
-- abrt_rh_support: improve error messages rhbz#608698 (vda.linux@googlemail.com)
-- Added BacktraceRemotes option. (kklic@redhat.com)
-- Allow remote crashes to not to belong to a package. Skip GPG check on remote crashes. (kklic@redhat.com)
-- remove obsolete Catcut and rhfastcheck reporters (vda.linux@googlemail.com)
-- make rhel bug point to correct place rhbz#578397 (npajkovs@redhat.com)
-- Show comment and how to reproduce fields when reporing crashes in abrt-cli (kklic@redhat.com)
-- Bash completion update (kklic@redhat.com)
-- Rename --get-list to --list (kklic@redhat.com)
-- Update man page (kklic@redhat.com)
-- Options overhaul (kklic@redhat.com)
-- abrt should not point to Fedora bugs but create new RHEL bug instead (npajkovs@redhat.com)
-- Don't show global uuid in report (npajkovs@redhat.com)
-- GUI: don't try to use action plugins as reporters (jmoskovc@redhat.com)
-- Added WatchCrashdumpArchiveDir directive to abrt.conf and related code (vda.linux@googlemail.com)
-- GUI: don't show the placehondler icon rhbz#605693 (jmoskovc@redhat.com)
-- Make "Loaded foo.conf" message less confusing (vda.linux@googlemail.com)
-- Fixed a flaw in strbuf_prepend_str (kklic@redhat.com)
-- TicketUploader: do not add '\n' to text files in crashdump (vda.linux@googlemail.com)
-- GUI: skip the plugin selection, if it's not needed (jmoskovc@redhat.com)
-- Check conf file for syntax errors (kklic@redhat.com)
-- move misplaced sanity checks in cron parser (vda.linux@googlemail.com)
-- GUI: don't require the rating for all reporters (jmoskovc@redhat.com)
-- GUI: fixed exception when there is no configure dialog for plugin rhbz#603745 (jmoskovc@redhat.com)
-- Add a GUI config dialog for RHTSupport plugin (vda.linux@googlemail.com)
-- abrt_curl: fix a problem with incorrect content-length on 32-bit arches (vda.linux@googlemail.com)
-- sosreport: save the dump directly to crashdump directory (vda.linux@googlemail.com)
-- plugin rename: rhticket -> RHTSupport (vda.linux@googlemail.com)
-- Daemon socket for reporting crashes (karel@localhost.localdomain)
-- GUI: fixed few typos (jmoskovc@redhat.com)
-
-* Wed Jul 21 2010 David Malcolm <dmalcolm@redhat.com> - 1.1.5-1.1
-- Rebuilt for https://fedoraproject.org/wiki/Features/Python_2.7/MassRebuild
-
-* Wed Jun 09 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.5-1
-- GUI: polished the reporter assistant (jmoskovc@redhat.com)
-- Logger reporter: do not store useless info (vda.linux@googlemail.com)
-- ccpp hook: add SaveBinaryImage option which saves of the crashed binary (vda.linux@googlemail.com)
-- SPEC: added CFLAGS="-fno-strict-aliasing" to fix the rpmdiff warnings rhbz#599364 (jmoskovc@redhat.com)
-- GUI: don't remove user comments when re-reporting the bug rhbz#601779 (jmoskovc@redhat.com)
-- remove "(deleted)" from executable path rhbz#593037 (jmoskovc@redhat.com)
-- CCpp analyzer: add 60 sec cap on gdb run time. (vda.linux@googlemail.com)
-- add new file *hostname* into debugdump directory (npajkovs@redhat.com)
-- rhticket: upload real tarball, not a bogus file (vda.linux@googlemail.com)
-- abrt-hook-ccpp: eliminate race between process exit and compat coredump creation rhbz#584554 (vda.linux@googlemail.com)
-- rhticket: actually do create ticket, using Gavin's lib code (vda.linux@googlemail.com)
-- properly obsolete gnome-python2-bugbuddy rhbz#579748 (jmoskovc@redhat.com)
-- GUI: remember comment and howto on backtrace refresh rhbz#545690 (jmoskovc@redhat.com)
-- use header case in button label rhbz#565812 (jmoskovc@redhat.com)
-- make log window resizable (vda.linux@googlemail.com)
-- rename a few remaining /var/cache/abrt -> /var/spool/abrt (vda.linux@googlemail.com)
-
-* Wed May 26 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.4-1
-- added reporting wizard
-- fixed few leaked fds
-- fixed kerneloops --- cut here --- problem
-- updated translations
-
-* Fri May 21 2010 Denys Vlasenko <dvlasenk@redhat.com> 1.1.3-1
-- More fixes for /var/cache/abrt -> /var/spool/abrt conversion
-
-* Fri May 21 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.2-3
-- fixed spec file to create /var/spool/abrt rhbz#593670
-- updated init script to reflect the pid file renaming
-
-* Wed May 19 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.2-1
-- updated translation
-- obsolete gnome-python2-bugbuddy rhbz#579748 (jmoskovc@redhat.com)
-- Report "INFO: possible recursive locking detected rhbz#582378 (vda.linux@googlemail.com)
-- kill yumdownloader if abrt-debuginfo-install is terminated mid-flight (vda.linux@googlemail.com)
-- do not create Python dumps if argv[0] is not absolute (vda.linux@googlemail.com)
-- improve kerneloops hash (vda.linux@googlemail.com)
-- Move /var/cache/abrt to /var/spool/abrt. rhbz#568101. (vda.linux@googlemail.com)
-- bugzilla: better summary and decription messages (npajkovs@redhat.com)
-- renamed daemon pid and lock file rhbz#588315 (jmoskovc@redhat.com)
-- Daemon socket for reporting crashes (kklic@redhat.com)
-- Move hooklib from src/Hooks to lib/Utils (kklic@redhat.com)
-
-* Thu May 13 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.1-1
-- updated translations
-- removed avant-window-navigator from blacklist (jmoskovc@redhat.com)
-- Abort debuginfo download if low on disk space (partially addresses #564451) (vda.linux@googlemail.com)
-- fix bug 588945 - sparse core files performance hit (vda.linux@googlemail.com)
-- Add BlackListedPaths option to abrt.conf. Fixes #582421 (vda.linux@googlemail.com)
-- Do not die when /var/cache/abrt/*/uid does not contain a number (rhbz#580899) (kklic@redhat.com)
-- rid of rewriting config in /etc/abrt/abrt.conf (npajkovs@redhat.com)
-- fix bug 571411: backtrace attachment of the form /var/cache/abrt/foo-12345-67890/backtrace (vda.linux@googlemail.com)
-- Do not echo password to terminal in abrt-cli (kklic@redhat.com)
-- improved daemon error messages (kklic@redhat.com)
-
-* Mon May 03 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.1.0-1
-- updated transaltions
-- added Hebrew into languages
-- updated icons rhbz#587698 (jmoskovc@redhat.com)
-- Bugzilla login/password emptiness check uses 'or' instead of 'and' (kklic@redhat.com)
-- Show error message when abrtd service is run as non-root. rhbz#584352 (kklic@redhat.com)
-- Rename EnableOpenGPG to OpenGPGCheck in the man page rhbz#584332 (kklic@redhat.com)
-- Document ProcessUnpackaged in abrt.conf.5. Document default values. (kklic@redhat.com)
-- Crash function is now detected even for threads without an abort frame (kklic@redhat.com)
-- comment can be private (npajkovs@redhat.com)
-- do not catch perl/python crashes when the script is not of known package origin (kklic@redhat.com)
-- kerneloop is more informative when failed (npajkovs@redhat.com)
-- add function name into summary(if it's found) (npajkovs@redhat.com)
-- Change kerneloops message when it fails (npajkovs@redhat.com)
-
-* Fri Apr 30 2010 Karel Klic <kklic@redhat.com> 1.0.9-3
-- fixed crash function detection (a part of duplication detection)
-
-* Wed Apr 14 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.0.9-2
-- fixed problem with localized yum messages rhbz#581804
-- better bugzilla summary (napjkovs@redhat.com)
-- ignore interpreter (py,perl) crashes caused by unpackaged scripts (kklic@redhat.com)
-
-* Tue Apr 06 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.0.9-1
-- hooklib: fix excessive rounding down in free space calculation (bz#575644) (vda.linux@googlemail.com)
-- gui: fix 551989 "crash detected in abrt-gui-1.0.0-1.fc12" and such (vda.linux@googlemail.com)
-- trivial: fix 566806 "abrt-gui sometimes can't be closed" (vda.linux@googlemail.com)
-- gui: fix the last case where gnome-keyring's find_items_sync() may throw DeniedError (vda.linux@googlemail.com)
-- fixed some compilation problems on F13 (jmoskovc@redhat.com)
-- updated translations (jmoskovc@redhat.com)
-- minor fix to sosreport to make it work with latest sos rhbz#576861 (jmoskovc@redhat.com)
-
-* Wed Mar 31 2010 Jiri Moskovcak <jmoskovc@redhat.com> 1.0.9-0.201003312045.1
-- test day build
-- updated translation
-- minor fix to sosreport to make it work with latest sos rhbz#576861 (jmoskovc@redhat.com)
-- GUI: total rewrite based on design from Mairin Duffy (jmoskovc@redhat.com)
-- trivial: better HTTP/curl error reporting (vda.linux@googlemail.com)
-- Use backtrace parser from abrtutils, new backtrace rating algorithm, store crash function if it's known (kklic@redhat.com)
-- abrt-rate-backtrace is replaced by abrt-backtrace --rate (kklic@redhat.com)
-- Ignore some temp files (kklic@redhat.com)
-- PYHOOK: don't use sitecustomize.py rhbz#539497 (jmoskovc@redhat.com)
-- rhfastcheck: a new reporter plugin based on Gavin's work (vda.linux@googlemail.com)
-- rhticket: new reporter plugin (vda.linux@googlemail.com)
-- GUI: fixed few window icons (jmoskovc@redhat.com)
-- Allow user to select which reporter he wants to use to report a crash using CLI.(kklic@redhat.com)
-- bz reporter: s/uuid/duphash; more understandable message; simplify result str generation; fix indentation (vda.linux@googlemail.com)
-- GUI: fixed crash count column sorting rhbz#573139 (jmoskovc@redhat.com)
-- Kerneloops: use 1st line of oops as REASON. Closes rhbz#574196. (vda.linux@googlemail.com)
-- Kerneloops: fix a case when we file an oops w/o backtrace (vda.linux@googlemail.com)
-- minor fix in abrt-debuginfo-install to make it work with yum >= 3.2.26 (jmoskovc@redhat.com)
-- GUI: added action to applet to directly report last crash (jmoskovc@redhat.com)
-- Never flag backtrace as binary file (fixes problem observed in bz#571411) (vda.linux@googlemail.com)
-- improve syslog file detection. closes bz#565983 (vda.linux@googlemail.com)
-- add arch, package and release in comment (npajkovs@redhat.com)
-- add ProcessUnpackaged option to abrt.conf (vda.linux@googlemail.com)
-- abrt-debuginfo-install: use -debuginfo repos which match enabled "usual" repos (vda.linux@googlemail.com)
-- fix format security error (fcrozat@mandriva.com)
-- icons repackaging (jmoskovc@redhat.com)
-- partial fix for bz#565983 (vda.linux@googlemail.com)
-- SPEC: Updated source URL (jmoskovc@redhat.com)
-- removed unneeded patches
-- and much more ...
-
-* Sat Mar 13 2010  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.8-3
-- fixed kerneloops reporting rhbz#570081
-- fixed Source url
-- fixed debuginfo-install to work on F13
-  - improved debuginfo-install (vda.linux@googlemail.com)
-  - fix debuginfo-install to work with yum >= 3.2.26 (jmoskovc@redhat.com)
-
-* Wed Mar  3 2010  Denys Vlasenko <dvlasenk@redhat.com> 1.0.8-2
-- fix initscript even more (npajkovs@redhat.com)
-- remove -R2 from yum command line
-
-* Mon Feb 22 2010  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.8-1
-- fix initscript (npajkovs@redhat.com)
-- Kerneloops: make hashing more likely to produce same hash on different oopses (vda.linux@googlemail.com)
-
-* Mon Feb 22 2010  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.8-0.git-20100222
-- Kerneloops: make hashing more likely to produce same hash on different oopses (vda.linux@googlemail.com)
-- make abrt work with the latest kernels (>= 2.6.33) (jmoskovc@redhat.com)
-- lib/Utils/abrt_dbus: utf8-sanitize all strings in dbus messages (fixes #565876) (vda.linux@googlemail.com)
-
-* Fri Feb 12 2010  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.7-1
-- enabled column sorting rhbz#541853
-- Load plugin settings also from ~/.abrt/*.conf (kklic@redhat.com)
-- fix bz#541088 "abrt should not catch python excp EPIPE" (vda.linux@googlemail.com)
-- fix bz#554242 "Cannot tab between input areas in report dialog" (vda.linux@googlemail.com)
-- fix bz#563484 "abrt uses unnecessary disk space when getting debug info" (vda.linux@googlemail.com)
-- Don't show empty 'Not loaded plugins' section - fix#2 rhbz#560971 (jmoskovc@redhat.com)
-- fix big-endian build problem (vda.linux@googlemail.com)
-- Fixes, displays package owners (kklic@redhat.com)
-- GUI: fixed exception in plugin settings dialog rhbz#560851 (jmoskovc@redhat.com)
-- GUI: respect system settings for toolbars rhbz#552161 (jmoskovc@redhat.com)
-- python hook: move UUID generation to abrtd; generate REASON, add it to bz title (vda.linux@googlemail.com)
-- make "reason" field less verbose; bz reporter: include it in "summary" (vda.linux@googlemail.com)
-- added avant-window-navigator to blacklist per maintainer request (jmoskovc@redhat.com)
-- CCpp analyzer: fix rhbz#552435 (bt rating misinterpreting # chars) (vda.linux@googlemail.com)
-- Ask for login and password if missing from reporter plugin. (kklic@redhat.com)
-- abrtd: fix handling of dupes (weren't deleting dup's directory); better logging (vda.linux@googlemail.com)
-- abrtd: handle "perl -w /usr/bin/script" too (vda.linux@googlemail.com)
-- Component-wise duplicates (kklic@redhat.com)
-- abrtd: fix rhbz#560642 - don't die on bad plugin names (vda.linux@googlemail.com)
-- Fixed parsing backtrace from rhbz#549293 (kklic@redhat.com)
-- GUI: fixed scrolling in reporter dialog rhbz#559687 (jmoskovc@redhat.com)
-- fixed button order in plugins windows rhbz#560961 (jmoskovc@redhat.com)
-- GUI: fixed windows icons and titles rhbz#537240, rhbz#560964 (jmoskovc@redhat.com)
-- Fix to successfully parse a backtrace from rhbz#550642 (kklic@redhat.com)
-- cli: fix the problem of not showing oops text in editor (vda.linux@googlemail.com)
-- GUI: fix rhbz#560971 "Don't show empty 'Not loaded plugins' section" (vda.linux@googlemail.com)
-
-* Tue Feb  2 2010  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.6-1
-- print __glib_assert_msg (rhbz#549735);
-- SPEC: added some requires to abrt-cli to make it work out-of-the-box (jmoskovc@redhat.com)
-- abrt-hook-ccpp: fix rhbz#560612 "limit '18446744073709551615' is bogus" rhbz#560612(vda.linux@googlemail.com)
-- APPLET: don't show the icon when abrtd is not running rhbz#557866 (jmoskovc@redhat.com)
-- GUI: made report message labels wrap (jmoskovc@redhat.com)
-- GUI: don't die if daemon doesn't send the gpg keys (jmoskovc@redhat.com)
-- disabled the autoreporting of kerneloopses (jmoskovc@redhat.com)
-- Kerneloops: fix BZ reporting of oopses (vda.linux@googlemail.com)
-- GUI: wider report message dialog (jmoskovc@redhat.com)
-- moved the gpg key list from abrt.conf to gpg_keys file (jmoskovc@redhat.com)
-- Logger: create log file with mode 0600 (vda.linux@googlemail.com)
-- GUI: fixed the rating logic, to prevent sending BT with rating < 3 (jmoskovc@redhat.com)
-- Report GUI: made more fields copyable - closed rhbz#526209; tweaked wording (vda.linux@googlemail.com)
-- GUI: fixed bug caused by failed gk-authorization (jmoskovc@redhat.com)
-
-* Fri Jan 29 2010  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.5-1
-- moved the gpg key list from abrt.conf to gpg_keys file (jmoskovc@redhat.com)
-- Logger: create log file with mode 0600 rhbz#559545 (vda.linux@googlemail.com)
-- GUI: fixed the rating logic, to prevent sending BT with rating < 3 (jmoskovc@redhat.com)
-- Report GUI: made more fields copyable - closed rhbz#526209; tweaked wording (vda.linux@googlemail.com)
-- GUI: fixed bug caused by failed gk-authorization (jmoskovc@redhat.com)
-- fix bug 559881 (kerneloops not shown in "new" GUI) (vda.linux@googlemail.com)
-- GUI ReporterDialog: hide log button (vda.linux@googlemail.com)
-- added valgrind and strace to blacklist (jmoskovc@redhat.com)
-- SOSreport: do not leave stray files in /tmp (vda.linux@googlemail.com)
-- Save the core where it belongs if ulimit -c is > 0 (jmoskovc@redhat.com)
-- reenabled gpg check (jmoskovc@redhat.com)
-- SOSreport: run it niced (vda.linux@googlemail.com)
-- report GUI: rename buttons: Log -> Show log, Send -> Send report (vda.linux@googlemail.com)
-- applet: reduce blinking timeout to 3 sec (vda.linux@googlemail.com)
-- fix dbus autostart (vda.linux@googlemail.com)
-- abrtd: set "Reported" status only if at least one reporter succeeded (vda.linux@googlemail.com)
-- SQLite3: disable newline escaping, SQLite does not handle it (vda.linux@googlemail.com)
-- SOSreport: make it avoid double runs; add forced regeneration; upd PLUGINS-HOWTO (vda.linux@googlemail.com)
-- attribute SEGVs in perl to script's package, like we already do for python (vda.linux@googlemail.com)
-
-* Wed Jan 20 2010  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.4-1
-- enabled sosreport
-- fixes in ticketuploader
-- GUI: redesign of reporter dialog (jmoskovc@redhat.com)
-- Set the prgname to "Automatic Bug Reporting Tool" fixes rhbz#550357 (jmoskovc@redhat.com)
-- CCpp analyzer: display __abort_msg in backtrace. closes rhbz#549735 (vda.linux@googlemail.com)
-- s/os.exit/sys.exit - closes rhbz#556313 (vda.linux@googlemail.com)
-- use repr() to print variable values in python hook rhbz#545070 (jmoskovc@redhat.com)
-- gui: add logging infrastructure (vda.linux@googlemail.com)
-- Added "Enabled = yes" to all plugin's config files (jmoskovc@redhat.com)
-- *: disable plugin loading/unloading through GUI. Document keyring a bit (vda.linux@googlemail.com)
-- fix memory leaks in catcut plugin (npajkovs@redhat.com)
-- fix memory leaks in bugzilla (npajkovs@redhat.com)
-- abrt-hook-python: sanitize input more; log to syslog (vda.linux@googlemail.com)
-- Fixed /var/cache/abrt/ permissions (kklic@redhat.com)
-- Kerneloops: we require commandline for every crash, save dummy one for oopses (vda.linux@googlemail.com)
-- *: remove nss dependencies (vda.linux@googlemail.com)
-- CCpp: use our own sha1 implementation (less pain with nss libs) (vda.linux@googlemail.com)
-- DebugDump: more consistent logic in setting mode and uid:gid on dump dir (vda.linux@googlemail.com)
-- fixes based on security review (vda.linux@googlemail.com)
-- SOSreport/TicketUploader: use more restrictive file modes (vda.linux@googlemail.com)
-- abrt-hook-python: add input sanitization and directory size guard (vda.linux@googlemail.com)
-- RunApp: safer chdir. Overhauled "sparn a child and get its output" in general (vda.linux@googlemail.com)
-- DebugDump: use more restrictive modes (vda.linux@googlemail.com)
-- SQLite3: check for SQL injection (vda.linux@googlemail.com)
-- replace plugin enabling via EnabledPlugins by par-plugin Enabled = yes/no (vda.linux@googlemail.com)
-- abrt.spec: move "requires: gdb" to abrt-desktop (vda.linux@googlemail.com)
-- ccpp: add a possibility to disable backtrace generation (vda.linux@googlemail.com)
-- abrtd: limit the number of frames in backtrace to 3000 (vda.linux@googlemail.com)
-
-* Tue Jan  5 2010  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.3-1
-- speed optimalization of abrt-debuginfo-install (jmoskovc@redhat.com)
-- updated credits (jmoskovc@redhat.com)
-- GUI: fixed crash when abrt-gui is run without X server rhbz#552039 (jmoskovc@redhat.com)
-- abrt-backtrace manpage installed (kklic@redhat.com)
-- cmdline and daemon checking is done by abrt-python-hook (kklic@redhat.com)
-- moved get_cmdline() and daemon_is_ok() to abrtlib (kklic@redhat.com)
-- large file support for whole abrt (kklic@redhat.com)
-- made s_signal_caught volatile (vda.linux@googlemail.com)
-- abrt-debuginfo-install: fixes for runs w/o cachedir (vda.linux@googlemail.com)
-- remove unsafe log() from signal handler (vda.linux@googlemail.com)
-- src/Hooks/CCpp.cpp: use and honour 'c' (core limit size). (vda.linux@googlemail.com)
-- lib/Plugins/CCpp.cpp: save gdb error messages too (vda.linux@googlemail.com)
-- prevent destructors from throwing exceptions; check curl_easy_init errors (vda.linux@googlemail.com)
-- don't blame python for every crash in /usr/bin/python rhbz#533521 trac#109 (jmoskovc@redhat.com)
-- GUI: autoscroll log window (jmoskovc@redhat.com)
-- Kerneloops.conf: better comments (vda.linux@googlemail.com)
-- applet: reduce blinking time to 30 seconds (vda.linux@googlemail.com)
-- add paranoia checks on setuid/setgid (vda.linux@googlemail.com)
-- more "obviously correct" code for secure opening of /dev/null (vda.linux@googlemail.com)
-- get rid of ugly sleep call inside while() (vda.linux@googlemail.com)
-
-* Mon Dec 14 2009  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.2-1
-- disabled GPG check again (jmoskovc@redhat.com)
-- abrt-pyhook-helper rename (vda.linux@googlemail.com)
-- abrt-cli: report success/failure of reporting. closes bug 71 (vda.linux@googlemail.com)
-- less logging (vda.linux@googlemail.com)
-- mkde abrt-gui --help and --version behave as expected. closes bug 85 (vda.linux@googlemail.com)
-- dbus lib: fix parsing of 0-element arrays. Fixes bug 95 (vda.linux@googlemail.com)
-- make "abrt-cli --delete randomuuid" report that deletion failed. closes bug 59 (vda.linux@googlemail.com)
-- applet: make animation stop after 1 minute. (closes bug 108) (vda.linux@googlemail.com)
-- show comment and how to reproduce fields, when BT rating > 3 (jmoskovc@redhat.com)
-- Gui: make report status window's text wrap. Fixes bug 82 (vda.linux@googlemail.com)
-- CCpp analyzer: added "info sharedlib" (https://fedorahosted.org/abrt/ticket/90) (vda.linux@googlemail.com)
-- added link to bugzilla new account page to Bugzilla config dialog (jmoskovc@redhat.com)
-- GUI: added log window (jmoskovc@redhat.com)
-
-* Tue Dec  8 2009  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.1-1
-- PyHook: better logic for checking if abrtd is running rhbz#539987 (jmoskovc@redhat.com)
-- re-enabled gpg sign checking (jmoskovc@redhat.com)
-- PyHook: use repr() for displaying variables rhbz#545070 (jmoskovc@redhat.com)
-- kerneloops: fix the linux kernel version identification (aarapov@redhat.com)
-- gui review (rrakus@redhat.com)
-- when we trim the dir, we must delete it from DB too rhbz#541854 (vda.linux@googlemail.com)
-- improved dupe checking (kklic@redhat.com)
-- GUI: handle cases when gui fails to start daemon on demand rhbz#543725 (jmoskovc@redhat.com)
-- Add abrt group only if it is missing; fixes rhbz#543250 (kklic@redhat.com)
-- GUI: more string fixes rhbz#543266 (jmoskovc@redhat.com)
-- abrt.spec: straighten out relations between abrt-desktop and abrt-gui (vda.linux@googlemail.com)
-- refuse to start if some required plugins are missing rhbz#518422 (vda.linux@googlemail.com)
-- GUI: survive gnome-keyring access denial rhbz#543200 (jmoskovc@redhat.com)
-- typo fixes rhbz#543266 (jmoskovc@redhat.com)
-- abrt-debuginfo-install: better fix for incorrect passing double quotes (vda.linux@googlemail.com)
-- APPLET: stop animation when it's not needed rhbz#542157 (jmoskovc@redhat.com)
-- ccpp hook: reanme it, and add "crash storm protection" (see rhbz#542003) (vda.linux@googlemail.com)
-- Hooks/CCpp.cpp: add MakeCompatCore = yes/no directive. Fixes rhbz#541707 (vda.linux@googlemail.com)
-- SPEC: removed sqlite3 package, fixed some update problems (jmoskovc@redhat.com)
-- Kerneloops are reported automaticky now when AutoReportUIDs = root is in Kerneloops.conf (npajkovs@redhat.com)
-- remove word 'detected' from description rhbz#541459 (vda.linux@googlemail.com)
-- src/Hooks/CCpp.cpp: do save abrtd's own coredumps, but carefully... (vda.linux@googlemail.com)
-- CCpp.cpp: quote parameters if needed rhbz#540164 (vda.linux@googlemail.com)
-
-* Fri Nov 20 2009  Jiri Moskovcak <jmoskovc@redhat.com> 1.0.0-1
-- new version
-- comment input wraps words rhbz#531276
-- fixed hiding password dialog rhbz#529583
-- easier kerneloops reporting rhbz#528395
-- made menu entry translatable rhbz#536878 (jmoskovc@redhat.com)
-- GUI: don't read the g-k every time we want to use the setting (jmoskovc@redhat.com)
-- GUI: survive if g-k access is denied rhbz#534171 (jmoskovc@redhat.com)
-- include more info into oops (we were losing the stack dump) (vda.linux@googlemail.com)
-- make BZ insert small text attachments inline; move text file detection code (vda.linux@googlemail.com)
-- GUI: fixed text wrapping in comment field rhbz#531276 (jmoskovc@redhat.com)
-- GUI: added cancel to send dialog rhbz#537238 (jmoskovc@redhat.com)
-- include abrt version in bug descriptions (vda.linux@googlemail.com)
-- ccpp hook: implemented ReadonlyLocalDebugInfoDirs directive (vda.linux@googlemail.com)
-- GUI: added window icon rhbz#537240 (jmoskovc@redhat.com)
-- add support for \" escaping in config file (vda.linux@googlemail.com)
-- add experimental saving of /var/log/Xorg*.log for X crashes (vda.linux@googlemail.com)
-- APPLET: changed icon from default gtk-warning to abrt specific, add animation (jmoskovc@redhat.com)
-- don't show icon on abrtd start/stop rhbz#537630 (jmoskovc@redhat.com)
-- /var/cache/abrt permissions 1775 -> 0775 in spec file (kklic@redhat.com)
-- Daemon properly checks /var/cache/abrt attributes (kklic@redhat.com)
-- abrt user group; used by abrt-pyhook-helper (kklic@redhat.com)
-- pyhook-helper: uid taken from system instead of command line (kklic@redhat.com)
-- KerneloopsSysLog: fix breakage in code which detects abrt marker (vda.linux@googlemail.com)
-- GUI: added support for backtrace rating (jmoskovc@redhat.com)
-- InformAllUsers support. enabled by default for Kerneloops. Tested wuth CCpp. (vda.linux@googlemail.com)
-- abrtd: call res_init() if /etc/resolv.conf or friends were changed rhbz#533589 (vda.linux@googlemail.com)
-- supress errors in python hook to not colide with the running script (jmoskovc@redhat.com)
-
-* Tue Nov 10 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.11-2
-- spec file fixes
-
-* Mon Nov  2 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.11-1
-- re-enabled kerneloops
-- abrt-debuginfo-install: download packages one-by-one - better logging (vda.linux@googlemail.com)
-- do not report empty fields (vda.linux@googlemail.com)
-- Added abrt.png, fixed rhbz#531181 (jmoskovc@redhat.com)
-- added option DebugInfoCacheMB to limit size of unpacked debuginfos (vda.linux@googlemail.com)
-- fixed the problem with overwriting the default plugin settings (jmoskovc@redhat.com)
-- disabled kerneloops in config file (jmoskovc@redhat.com)
-- added dependency to gdb >= 7.0 (jmoskovc@redhat.com)
-- better format of report text (vda.linux@googlemail.com)
-- Python backtrace size limited to 1 MB (kklic@redhat.com)
-- lib/Plugins/Bugzilla: better message at login failure (vda.linux@googlemail.com)
-- build fixes, added plugin-logger to abrt-desktop (jmoskovc@redhat.com)
-- blacklisted nspluginwrapper, because it causes too many useless reports (jmoskovc@redhat.com)
-- GUI: Wrong settings window is not shown behind the reporter dialog rhbz#531119 (jmoskovc@redhat.com)
-- Normal user can see kerneloops and report it Bugzilla memory leaks fix (npajkovs@redhat.com)
-- dumpoops: add -s option to dump results to stdout (vda.linux@googlemail.com)
-- removed kerneloops from abrt-desktop rhbz#528395 (jmoskovc@redhat.com)
-- GUI: fixed exception when enabling plugin rhbz#530495 (jmoskovc@redhat.com)
-- Improved abrt-cli (kklic@redhat.com)
-- Added backtrace rating to CCpp analyzer (dnovotny@redhat.com)
-- GUI improvements (jmoskovc@redhat.com)
-- Added abrt-pyhook-helper (kklic@redhat.com)
-
-* Thu Oct 15 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.10-1
-- new version
-- added more logging (vda.linux@googlemail.com)
-- made polkit policy to be more permissive when installing debuginfo (jmoskovc@redhat.com)
-- lib/Plugins/CCpp.cpp: add build-ids to backtrace (vda.linux@googlemail.com)
-- lib/Plugins/CCpp.cpp: do not use temp file for gdb commands - use -ex CMD instead (vda.linux@googlemail.com)
-- GUI: added refresh button, added sanity check to plugin settings (jmoskovc@redhat.com)
-- Initial man page for abrt-cli (kklic@redhat.com)
-- Added --version, -V, --help, -? options. Fixed crash caused by unknown option. (kklic@redhat.com)
-- Date/time honors current system locale (kklic@redhat.com)
-- fixed saving/reading user config (jmoskovc@redhat.com)
-- SPEC: added gnome-python2-gnomekeyring to requirements (jmoskovc@redhat.com)
-- GUI: call Report() with the latest pluginsettings (jmoskovc@redhat.com)
-- Fix Bug 526220 -  [abrt] crash detected in abrt-gui-0.0.9-2.fc12 (vda.linux@googlemail.com)
-- removed unsecure reading/writting from ~HOME directory rhbz#522878 (jmoskovc@redhat.com)
-- error checking added to archive creation (danny@rawhide.localdomain)
-- try using pk-debuginfo-install before falling back to debuginfo-install (vda.linux@googlemail.com)
-- abrt-gui: make "report" toolbar button work even if abrtd is not running (vda.linux@googlemail.com)
-- set LIMIT_MESSAGE to 16k, typo fix and daemon now reads config information from dbus (npajkovs@redhat.com)
-- add support for abrtd autostart (vda.linux@googlemail.com)
-- GUI: reversed the dumplist, so the latest crashes are at the top (jmoskovc@redhat.com)
-- rewrite FileTransfer to use library calls instead of commandline calls for compression (dnovotny@redhat.com)
-- and many minor fixes ..
-
-* Wed Sep 23 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.9-2
-- added bug-buddy to provides rhbz#524934
-
-* Tue Sep 22 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.9-1
-- new version
-- comments and how to reproduce are stored now (npajkovs@redhat.com)
-- reduce verbosity a bit (vda.linux@googlemail.com)
-- GUI: fixed word wrap in Comment field rhbz#524349 (jmoskovc@redhat.com)
-- remove last vestives of dbus-c++ from build system (vda.linux@googlemail.com)
-- GUI: added popup menu, fixed behaviour when run with root privs (jmoskovc@redhat.com)
-- add dbus signalization when quota exceeded (npajkovs@redhat.com)
-- Added cleaning of attachment variable, so there should not be mixed attachmetn anymore. (zprikryl@redhat.com)
-- fixed closing of debug dump in case of existing backtrace (zprikryl@redhat.com)
-- remove C++ dbus glue in src/CLI; fix a bug in --report (vda.linux@googlemail.com)
-- new polkit action for installing debuginfo, default "yes" (danny@rawhide.localdomain)
-- Polkit moved to Utils (can be used both in daemon and plugins) (danny@rawhide.localdomain)
-- oops... remove stray trailing '\' (vda.linux@googlemail.com)
-- GUI: added missing tooltips (jmoskovc@redhat.com)
-- PYHOOK: ignore KeyboardInterrupt exception (jmoskovc@redhat.com)
-- added ticket uploader plugin (gavin@redhat.com) (zprikryl@redhat.com)
-- GUI: added UI for global settings (just preview, not usable!) (jmoskovc@redhat.com)
-- Add checker if bugzilla login and password are filled in. (npajkovs@redhat.com)
-- Add new config option InstallDebuginfo into CCpp.conf (npajkovs@redhat.com)
-- translation updates
-- many other fixes
-
-* Fri Sep  4 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.8.5-1
-- new version
-- APPLET: added about dialog, removed popup, if icon is not visible, fixed (trac#43) (jmoskovc@redhat.com)
-- renamed abrt to abrtd, few minor spec file fixes (jmoskovc@redhat.com)
-- Made abrt service start by deafult (jmoskovc@redhat.com)
-- add gettext support for all plugins (npajkovs@redhat.com)
-- APPLET: removed the warning bubble about not running abrt service (walters)
-- APPLET: changed tooltip rhbz#520293 (jmoskovc@redhat.com)
-- CommLayerServerDBus: rewrote to use dbus, not dbus-c++ (vda.linux@googlemail.com)
-- fixed timeout on boot causing [ FAILED ] message (vda.linux@googlemail.com)
-- and many other fixes
-
-* Wed Sep 02 2009  Colin Walters <watlers@verbum.org> 0.0.8-2
-- Change Conflicts: kerneloops to be an Obsoletes so we do the right thing
-  on upgrades.  Also add an Obsoletes: bug-buddy.
-
-* Wed Aug 26 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.8-1
-- new version
-- resolved: Bug 518420 -  ordinary user's abrt-applet shows up for root owned crashes (npajkovs)
-- GUI: added support for gettext (+part of czech translation) (jmoskovc)
-- added support for saving settings (zprikryl)
-- fixed conf: comment in the middle of the line isn't supported anymore (zprikryl)
-- BZ#518413 PATCH ... furious kerneloops reporting (aarapov)
-- GUI: added first part of support for gettext (jmoskovc)
-- add new parameter to FileTransfer plugin (dnovotny)
-- added support for updating abrt's table (zprikryl)
-- added check for cc-list and reporter. +1 is created iff reporter is somebody else and current user isn't in cc list. (zprikryl)
-- GUI: few improvements, to be more userfriendly (jmoskovc)
-- LOGGER: return valid uri of the log file on succes (jmoskovc)
-- GUI: bring the GUI up to front instead of just blinking in taskbar (trac#60, rhbz#512390) (jmoskovc)
-- Try to execute $bindir/abrt-gui, then fall back to $PATH search. Closes bug 65 (vda.linux)
-- APPLET: added popup menu (trac#37, rhbz#518386) (jmoskovc)
-- Improved report results (zprikryl)
-- Fixed sigsegv (#rhbz 518609) (zprikryl)
-- GUI: removed dependency on libsexy if gtk2 >= 2.17 (jmoskovc)
-- fixed signature check (zprikryl)
-- KerneloopsSysLog: check line length to be >= 4 before looking for "Abrt" (vda.linux)
-- Comment cannot start in the middle of the line. Comment has to start by Char # (first char in the line) (zprikryl)
-- command mailx isn't run under root anymore. (zprikryl)
-- GUI: added horizontal scrolling to report window (jmoskovc)
-- GUI: added clickable link to "after report" status window (jmoskovc)
-- added default values for abrt daemon (zprikryl)
-- Plugins/CCpp: remove trailing \n from debuginfo-install's output (vda.linux)
-- explain EnableGPGCheck option better (vda.linux)
-- mailx: correct English (vda.linux)
-- Bugzilla.conf: correct English (vda.linux)
-- GUI: nicer after report message (jmoskovc)
-- BZ plugin: removed /xmlrpc.cgi from config, made the report message more user friendly (jmoskovc)
-- CCpp plugin: do not abort if debuginfos aren't found (vda.linux)
-- abrt.spec: bump version to 0.0.7-2 (vda.linux)
-- mailx removed dangerous parameter option (zprikryl)
-- minimum timeout is 1 second (zprikryl)
-- in case of plugin error, don't delete debug dumps (zprikryl)
-- abrt-gui: fix crash when run by root (vda.linux)
-- and lot more in git log ...
-
-* Thu Aug 20 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.7.2-1
-- new version
-- fixed some bugs found during test day
-
-* Wed Aug 19 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.7.1-1
-- fixes to bugzilla plugin and gui to make the report message more user-friendly
-
-* Tue Aug 18 2009  Denys Vlasenko <dvlasenk@redhat.com> 0.0.7-2
-- removed dangerous parameter option
-- minimum plugin activation period is 1 second
-- in case of plugin error, don't delete debug dumps
-- abrt-gui: fix crash when run by root
-- simplify parsing of debuginfo-install output
-
-* Tue Aug 18 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.7-1
-- new version
-- added status window to show user some info after reporting a bug
-
-* Mon Aug 17 2009  Denys Vlasenko <dvlasenk@redhat.com> 0.0.6-1
-- new version
-- many fixes
-
-* Fri Jul 24 2009 Fedora Release Engineering <rel-eng@lists.fedoraproject.org> - 0.0.4-4
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_12_Mass_Rebuild
-
-* Thu Jun 25 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.4-3
-- fixed dependencies in spec file
-
-* Tue Jun 16 2009 Daniel Novotny <dnovotny@redhat.com> 0.0.4-2
-- added manual pages (also for plugins)
-
-* Mon Jun 15 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.4-1
-- new version
-- added cli (only supports sockets)
-- added python hook
-- many fixes
-
-* Fri Apr 10 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.3-1
-- new version
-- added bz plugin
-- minor fix in reporter gui
-- Configurable max size of debugdump storage rhbz#490889
-- Wrap lines in report to keep the window sane sized
-- Fixed gui for new daemon API
-- removed unneeded code
-- removed dependency on args
-- new guuid hash creating
-- fixed local UUID
-- fixed debuginfo-install checks
-- renamed MW library
-- Added notification thru libnotify
-- fixed parsing settings of action plugins
-- added support for action plugins
-- kerneloops - plugin: fail gracefully.
-- Added commlayer to make dbus optional
-- a lot of kerneloops fixes
-- new approach for getting debuginfos and backtraces
-- fixed unlocking of a debugdump
-- replaced language and application plugins by analyzer plugin
-- more excetpion handling
-- conf file isn't needed
-- Plugin's configuration file is optional
-- Add curl dependency
-- Added column 'user' to the gui
-- Gui: set the newest entry as active (ticket#23)
-- Delete and Report button are no longer active if no entry is selected (ticket#41)
-- Gui refreshes silently (ticket#36)
-- Added error reporting over dbus to daemon, error handling in gui, about dialog
-
-* Wed Mar 11 2009  Jiri Moskovcak <jmoskovc@redhat.com> 0.0.2-1
-- added kerneloops addon to rpm (aarapov)
-- added kerneloops addon and plugin (aarapov)
-- Made Crash() private
-- Applet requires gui, removed dbus-glib deps
-- Closing stdout in daemon rhbz#489622
-- Changed applet behaviour according to rhbz#489624
-- Changed gui according to rhbz#489624, fixed dbus timeouts
-- Increased timeout for async dbus calls to 60sec
-- deps cleanup, signal AnalyzeComplete has the crashreport as an argument.
-- Fixed empty package Description.
-- Fixed problem with applet tooltip on x86_64
-
-* Wed Mar  4 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-13
-- More renaming issues fixed..
-- Changed BR from gtkmm24 to gtk2
-- Fixed saving of user comment
-- Added a progress bar, new Comment entry for user comments..
-- FILENAME_CMDLINE and FILENAME_RELEASE are optional
-- new default path to DB
-- Rename to abrt
-
-* Tue Mar  3 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-12
-- initial fedora release
-- changed SOURCE url
-- added desktop-file-utils to BR
-- changed crash-catcher to %%{name}
-
-* Mon Mar  2 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-11
-- more spec file fixes according to review
-- async dbus method calls, added exception handler
-- avoid deadlocks (zprikryl)
-- root is god (zprikryl)
-- create bt only once (zprikryl)
-
-* Sat Feb 28 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-10
-- New gui
-- Added new method DeleteDebugDump to daemon
-- Removed gcc warnings from applet
-- Rewritten CCpp hook and removed dealock in DebugDumps lib (zprikryl)
-- fixed few gcc warnings
-- DBusBackend improvements
-
-* Fri Feb 27 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-9
-- fixed few gcc warnings
-- added scrolled window for long reports
-
-* Thu Feb 26 2009 Adam Williamson <awilliam@redhat.com> 0.0.1-8
-- fixes for all issues identified in review
-
-* Thu Feb 26 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-7
-- Fixed cancel button behaviour in reporter
-- disabled core file sending
-- removed some debug messages
-
-* Thu Feb 26 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-6
-- fixed DB path
-- added new signals to handler
-- gui should survive the dbus timeout
-
-* Thu Feb 26 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-5
-- fixed catching debuinfo install exceptions
-- some gui fixes
-- added check for GPGP public key
-
-* Thu Feb 26 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-4
-- changed from full bt to simple bt
-
-* Thu Feb 26 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-3
-- spec file cleanups
-- changed default paths to crash DB and log DB
-- fixed some memory leaks
-
-* Tue Feb 24 2009 Jiri Moskovcak <jmoskovc@redhat.com> 0.0.1-2
-- spec cleanup
-- added new subpackage gui
-
-* Wed Feb 18 2009 Zdenek Prikryl <zprikryl@redhat.com> 0.0.1-1
-- initial packing

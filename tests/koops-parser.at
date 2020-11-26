@@ -2,7 +2,7 @@
 
 AT_BANNER([kernel oops parser])
 
-AT_TESTFUN([koops_extract_version],
+AT_TESTFUN([abrt_koops_extract_version],
 [[
 #include "libabrt.h"
 #include "koops-test.h"
@@ -11,21 +11,21 @@ int run_test(const struct test_struct *test)
 {
 	FILE *fp = xfopen_ro(test->filename);
 	fprintf(stderr, "%s\t", test->filename);
-	char *line;
-	char *version;
-	while ((line = xmalloc_fgetline(fp)) != NULL)
+	char *line = NULL;
+	char *version = NULL;
+	while ((line = libreport_xmalloc_fgetline(fp)) != NULL)
 	{
-		version = koops_extract_version(line);
-		free(line);
+		version = abrt_koops_extract_version(line);
+        free(line);
 		if (version && !strcmp(version, test->expected_results))
 			break;
 		free(version);
 		version = NULL;
 	}
 	if (version)
-		log("version %s", version);
+		log_warning("version %s", version);
 	else
-		log("version was not found");
+		log_warning("version was not found");
 	free(version);
 	fclose(fp);
 	return version == NULL;
@@ -60,33 +60,31 @@ enum {
 
 int run_test(const struct test_struct *test, int flags)
 {
-	char *koops_bt = fread_full(test->filename);
+	g_autofree char *koops_bt = fread_full(test->filename);
 
-	char *tnt = kernel_tainted_short(koops_bt);
-	free(koops_bt);
+	g_autofree char *tnt = abrt_kernel_tainted_short(koops_bt);
 	int ret = 0;
 	switch (flags) {
 	case TEST_NOT_TAINTED:
 		if (tnt)
 		{
-			log("%s '%s'", test->filename, tnt);
+			log_warning("%s '%s'", test->filename, tnt);
 			ret = 1;
 		}
 		break;
 	case TEST_TAINTED:
 		if (!tnt)
 		{
-			log("%s", test->filename);
+			log_warning("%s", test->filename);
 			ret = 1;
 		}
 		else if (strcmp(tnt, test->expected_results) != 0)
 		{
-			log("%s '%s'", test->filename, tnt);
+			log_warning("%s '%s'", test->filename, tnt);
 			ret = 1;
 		}
 	};
 
-	free(tnt);
 	return ret;
 }
 
@@ -105,12 +103,12 @@ int main(void)
 		{ EXAMPLE_PFX"/koops-tainted-insane", "ABCDEFGHIJKLMNOPQRSTUVWXYZ" },
 	};
 
-	log("test not tainted");
+	log_warning("test not tainted");
 	int ret = 0;
 	for (int i = 0; i < ARRAY_SIZE(not_tainted); ++i)
 		ret |= run_test(&not_tainted[i], TEST_NOT_TAINTED);
 
-	log("test tainted");
+	log_warning("test tainted");
 	for (int i = 0; i < ARRAY_SIZE(tainted); ++i)
 		ret |= run_test(&tainted[i], TEST_TAINTED);
 
@@ -125,21 +123,19 @@ AT_TESTFUN([koops_hash_improve],
 
 int run_test(const struct test_struct *test)
 {
-	char *oops1 = fread_full(test->filename);
-	char *oops2 = fread_full(test->expected_results);
+	g_autofree char *oops1 = fread_full(test->filename);
+	g_autofree char *oops2 = fread_full(test->expected_results);
 
-	char hash_oops1[SHA1_RESULT_LEN*2 + 1];
-	koops_hash_str(hash_oops1, oops1);
-	free(oops1);
+	g_autofree char *hash_oops1 = abrt_koops_hash_str(oops1);
+	g_autofree char *hash_oops2 = abrt_koops_hash_str(oops2);
 
-	char hash_oops2[SHA1_RESULT_LEN*2 + 1];
-	koops_hash_str(hash_oops2, oops2);
-	free(oops2);
+	if (NULL == hash_oops1 || NULL == hash_oops2)
+	    return 1;
 
 	if (!strcmp(hash_oops1, hash_oops2))
 		return 0;
 
-	log("'%s' != '%s'", hash_oops1, hash_oops2);
+	log_warning("'%s' != '%s'", hash_oops1, hash_oops2);
 
 	return 1;
 }
@@ -153,7 +149,7 @@ int main(void)
 		{ EXAMPLE_PFX"/nmi_oops_hash.test", EXAMPLE_PFX"/nmi_oops_hash.right" },
 	};
 
-    g_verbose = 4;
+    libreport_g_verbose = 4;
 
 	int ret = 0;
 	for (int i = 0; i < ARRAY_SIZE(all_same_hashes); ++i)
@@ -172,9 +168,9 @@ AT_TESTFUN([koops_parser_sanity],
 int run_test(const struct test_struct *test)
 {
 	char *oops_test = fread_full(test->filename);
-	char *oops_test_bck = oops_test;
+	g_autofree char *oops_test_bck = oops_test;
 	char *oops_expected = fread_full(test->expected_results);
-	char *oops_expected_bck = oops_expected;
+	g_autofree char *oops_expected_bck = oops_expected;
 
 	if (strncmp(oops_expected, "abrt-dump-oops: Found oopses:",
 				strlen("abrt-dump-oops: Found oopses:")) == 0) {
@@ -190,15 +186,13 @@ int run_test(const struct test_struct *test)
 
 	/* for testing purpose, I will record only one koops */
 	GList *oops_list = NULL;
-	koops_extract_oopses(&oops_list, oops_test, strlen(oops_test));
+	abrt_koops_extract_oopses(&oops_list, oops_test, strlen(oops_test));
 
 	int result = !(oops_list && !strcmp((char *)oops_list->data, oops_expected));
 	if (result)
-		log("'%s' \n '%s'", (char *)oops_list->data, oops_expected);
+		log_warning("Obtained:\n'%s'\nExpected:\n'%s'", (char *)oops_list->data, oops_expected);
 
 	g_list_free_full(oops_list, free);
-	free(oops_expected_bck);
-	free(oops_test_bck);
 
 	return result;
 }
@@ -210,6 +204,8 @@ int main(void)
 		{ EXAMPLE_PFX"/oops_recursive_locking1.test", EXAMPLE_PFX"/oops_recursive_locking1.right"},
 		{ EXAMPLE_PFX"/nmi_oops.test", EXAMPLE_PFX"/nmi_oops.right"},
 		{ EXAMPLE_PFX"/oops10_s390x.test", EXAMPLE_PFX"/oops10_s390x.right"},
+		{ EXAMPLE_PFX"/kernel_panic_oom.test", EXAMPLE_PFX"/kernel_panic_oom.right"},
+		{ EXAMPLE_PFX"/debug_messages.test", EXAMPLE_PFX"/debug_messages.right"},
 	};
 
 	int ret = 0;

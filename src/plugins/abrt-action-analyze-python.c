@@ -18,8 +18,16 @@
 */
 #include "libabrt.h"
 
+#include <satyr/stacktrace.h>
+#include <satyr/python/stacktrace.h>
+#include <satyr/thread.h>
+#include <satyr/python/frame.h>
+#include <satyr/frame.h>
+
 int main(int argc, char **argv)
 {
+    g_autofree char *checksum = NULL;
+
     /* I18n */
     setlocale(LC_ALL, "");
 #if ENABLE_NLS
@@ -43,30 +51,51 @@ int main(int argc, char **argv)
     };
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_STRING('d', NULL, &dump_dir_name, "DIR", _("Problem directory")),
         OPT_END()
     };
-    /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
+    /*unsigned opts =*/ libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
     struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
     if (!dd)
         return 1;
-    char *bt = dd_load_text(dd, FILENAME_BACKTRACE);
+    g_autofree char *bt = dd_load_text(dd, FILENAME_BACKTRACE);
+
+    /* save crash_function and exception_name into dumpdir */
+    g_autofree char *error_message = NULL;
+    struct sr_stacktrace *stacktrace = sr_stacktrace_parse(SR_REPORT_PYTHON,
+                                                           (const char *)bt, &error_message);
+    if (stacktrace)
+    {
+        struct sr_python_stacktrace *python_stacktrace = (struct sr_python_stacktrace *)stacktrace;
+        if (python_stacktrace->exception_name)
+            dd_save_text(dd, FILENAME_EXCEPTION_TYPE, python_stacktrace->exception_name);
+        /* thread is the same as stacktrace, if stacktrace is not NULL, thread
+         * is not NULL as well */
+        struct sr_thread *thread = sr_stacktrace_find_crash_thread(stacktrace);
+        struct sr_python_frame *frame = (struct sr_python_frame *)sr_thread_frames(thread);
+        if (frame && frame->function_name)
+            dd_save_text(dd, FILENAME_CRASH_FUNCTION, frame->function_name);
+
+        sr_stacktrace_free(stacktrace);
+    }
+    else
+    {
+        error_msg("Can't parse stacktrace: %s", error_message);
+    }
 
     /* Hash 1st line of backtrace and save it as UUID and DUPHASH */
     /* "example.py:1:<module>:ZeroDivisionError: integer division or modulo by zero" */
 
     char *bt_end = strchrnul(bt, '\n');
     *bt_end = '\0';
-    char hash_str[SHA1_RESULT_LEN*2 + 1];
-    str_to_sha1str(hash_str, bt);
-    free(bt);
+    checksum = g_compute_checksum_for_string(G_CHECKSUM_SHA1, bt, -1);
 
-    dd_save_text(dd, FILENAME_UUID, hash_str);
-    dd_save_text(dd, FILENAME_DUPHASH, hash_str);
+    dd_save_text(dd, FILENAME_UUID, checksum);
+    dd_save_text(dd, FILENAME_DUPHASH, checksum);
     dd_close(dd);
 
     return 0;

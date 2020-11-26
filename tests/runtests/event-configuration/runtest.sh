@@ -82,8 +82,8 @@ rlJournalStart
 
         prepare
         generate_crash
-        get_crash_path
         wait_for_hooks
+        get_crash_path
     rlPhaseEnd
 
     rlPhaseStartTest "Default values"
@@ -136,7 +136,7 @@ rlJournalStart
         rlRun "rm -f $TEST_INCLUDE_EVENT_XML_FILE_SYSTEM $TEST_INCLUDE_EVENT_DEF_FILE_SYSTEM"
         rlRun "rm -f ${TEST_INCLUDE_EVENT_CONF_FILE_SYSTEM} ${TEST_INCLUDE_EVENT_CONF_FILE_USER} ${TEST_INCLUDE_EVENT_CONF_FILE_XDG}"
 
-        rlRun "abrt-cli rm $crash_PATH"
+        remove_problem_directory
     rlPhaseEnd
 
     rlJournalPrintText

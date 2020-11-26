@@ -1,35 +1,19 @@
-bin_PROGRAMS = abrt-cli
+SUBDIRS = abrtcli tests
 
-CLI_C =
-CLI_C += abrt-cli.c
-CLI_C += abrt-cli-core.c
+bin_SCRIPTS = abrt
 
-BUILTIN_C =
-BUILTIN_C += list.c
-BUILTIN_C += rm.c
-BUILTIN_C += report.c
-BUILTIN_C += status.c
-BUILTIN_C += process.c
-
-abrt_cli_SOURCES = $(CLI_C) $(BUILTIN_C) builtin-cmd.h abrt-cli-core.h
-
-abrt_cli_CFLAGS = \
-	-I$(srcdir)/../include \
-	-I$(srcdir)/../lib \
-	$(LIBREPORT_CFLAGS) \
-	$(POLKIT_AGENT_CFLAGS)
-
-if SUGGEST_AUTOREPORTING
-abrt_cli_CFLAGS += -DSUGGEST_AUTOREPORTING=1
-endif
-
-abrt_cli_LDADD = \
-    $(POLKIT_AGENT_LIBS) \
-    $(LIBREPORT_LIBS) \
-    ../lib/libabrt.la
+bashcompdir = $(sysconfdir)/bash_completion.d
+dist_bashcomp_DATA = abrt.bash_completion
 
 profileconfigdir = $(sysconfdir)/profile.d
-dist_profileconfig_DATA = \
-    abrt-console-notification.sh
+dist_profileconfig_DATA = abrt-console-notification.sh
 
-DEFS = -DLOCALEDIR=\"$(localedir)\" @DEFS@
+TESTS_ENVIRONMENT = \
+	PYTHONPATH="$(srcdir)":"$(top_srcdir)/src/python-problem":"$(top_builddir)/src/python-problem/problem/.libs"
+TESTS = \
+	tests/test_filtering.py \
+	tests/test_match.py \
+	tests/test_utils.py
+dist_check_SCRIPTS = $(TESTS)
+
+EXTRA_DIST = $(bin_SCRIPTS)

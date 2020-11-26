@@ -33,7 +33,6 @@ int main(int argc, char **argv)
     abrt_init(argv);
 
     const char *dump_dir_name = ".";
-    int raw_fingerprints = 0; /* must be _int_, OPT_BOOL expects that! */
 
     /* Can't keep these strings/structs static: _() doesn't support that */
     const char *program_usage_string = _(
@@ -44,56 +43,54 @@ int main(int argc, char **argv)
     enum {
         OPT_v = 1 << 0,
         OPT_d = 1 << 1,
-        OPT_r = 1 << 2,
     };
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_STRING('d', NULL, &dump_dir_name, "DIR", _("Problem directory")),
-        OPT_BOOL('r', "raw", &raw_fingerprints, _("Do not hash fingerprints")),
         OPT_END()
     };
-    /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
+    /*unsigned opts =*/ libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
-    if (g_verbose > 1)
+    if (libreport_g_verbose > 1)
         sr_debug_parser = true;
 
     /* Let user know what's going on */
     log_notice(_("Generating core_backtrace"));
 
-    char *error_message = NULL;
+    g_autofree char *error_message = NULL;
     bool success;
 
 #ifdef ENABLE_NATIVE_UNWINDER
 
-    success = sr_abrt_create_core_stacktrace(dump_dir_name, !raw_fingerprints,
-                                             &error_message);
+    success = sr_abrt_create_core_stacktrace(dump_dir_name, false, &error_message);
 #else /* ENABLE_NATIVE_UNWINDER */
 
     /* The value 240 was taken from abrt-action-generate-backtrace.c. */
     int exec_timeout_sec = 240;
 
-    char *gdb_output = get_backtrace(dump_dir_name, exec_timeout_sec, NULL);
+    struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
+    if (!dd)
+        return 1;
+    g_autofree char *gdb_output = abrt_get_backtrace(dd, exec_timeout_sec, NULL);
     if (!gdb_output)
     {
-        log(_("Error: GDB did not return any data"));
+        log_warning(_("Error: GDB did not return any data"));
         return 1;
     }
 
     success = sr_abrt_create_core_stacktrace_from_gdb(dump_dir_name,
-                                                      gdb_output,
-                                                      !raw_fingerprints,
+                                                      gdb_output, false,
                                                       &error_message);
-    free(gdb_output);
+    dd_close(dd);
 
 #endif /* ENABLE_NATIVE_UNWINDER */
 
     if (!success)
     {
-        log(_("Error: %s"), error_message);
-        free(error_message);
+        log_warning(_("Error: %s"), error_message);
         return 1;
     }
 

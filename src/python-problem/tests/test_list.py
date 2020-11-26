@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 import os
 import sys
 import logging
@@ -8,8 +8,6 @@ sys.path.insert(0, os.path.abspath("../problem/.libs"))  # because of _pyabrt
 os.environ["PATH"] = "{0}:{1}".format(os.path.abspath(".."), os.environ["PATH"])
 
 import unittest
-
-from nose import tools
 
 from base import ProblematicTestCase
 
@@ -21,8 +19,7 @@ class ListTestCase(ProblematicTestCase):
         prob.add_current_process_data()
         ident = prob.save()
 
-        tools.ok_(ident in map(lambda x: x._probdir,
-            problem.list(False, self.proxy)))
+        assert ident in map(lambda x: x._probdir, problem.list(False, self.proxy))
 
         prob.delete()
 
@@ -31,8 +28,7 @@ class ListTestCase(ProblematicTestCase):
         prob.add_current_process_data()
         ident = prob.save()
 
-        tools.ok_(ident in map(lambda x: x._probdir,
-            problem.list(True, self.proxy)))
+        assert ident in map(lambda x: x._probdir, problem.list(True, self.proxy))
 
         prob.delete()
 

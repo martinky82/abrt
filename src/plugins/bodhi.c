@@ -22,11 +22,12 @@
 #include <rpm/rpmcli.h>
 #include <rpm/rpmdb.h>
 #include <rpm/rpmpgp.h>
-#include <hawkey/util.h>
 
 #include <libreport/internal_libreport.h>
 #include <libreport/libreport_curl.h>
 #include <libreport/client.h>
+
+#include "libabrt.h"
 
 //699198,705037,705036
 
@@ -133,13 +134,6 @@ static const char *bodhi_url = "https://bodhi.fedoraproject.org/updates";
 
 struct bodhi {
     char *nvr;
-#if 0
-    char *date_pushed;
-    char *status;
-    char *dist_tag;
-
-    GList *bz_ids;
-#endif
 };
 
 enum {
@@ -154,13 +148,6 @@ static void free_bodhi_item(struct bodhi *b)
         return;
 
     free(b->nvr);
-
-#if 0
-    list_free_with_free(b->bz_ids);
-    free(b->date_pushed);
-    free(b->status);
-    free(b->dist_tag);
-#endif
 
     free(b);
 }
@@ -180,42 +167,13 @@ static void bodhi_read_value(json_object *json, const char *item_name,
         *(int *) value = json_object_get_int(j);
         break;
     case BODHI_READ_STR:
-        *(char **) value = (char *) strtrimch(xstrdup(json_object_to_json_string(j)), '"');
+        *(char **) value = (char *) libreport_strtrimch(g_strdup(json_object_to_json_string(j)), '"');
         break;
     case BODHI_READ_JSON_OBJ:
         *(json_object **) value = (json_object *) j;
         break;
     };
 }
-
-#if 0
-static void print_bodhi(struct bodhi *b)
-{
-    for (GList *l = b->nvr; l; l = l->next)
-        printf("'%s' ", (char *)l->data);
-
-    for (GList *l = b->name; l; l = l->next)
-        printf("'%s' ", (char *)l->data);
-
-    if (b->date_pushed)
-        printf(" '%s'", b->date_pushed);
-
-    if (b->status)
-        printf(" '%s'", b->status);
-
-    if (b->dist_tag)
-        printf(" '%s'", b->dist_tag);
-
-    printf(" %i", b->karma);
-
-
-/*
-    for (GList *li = b->bz_ids; li; li = li->next)
-        printf(" %i", *(int*) li->data);
-*/
-    puts("");
-}
-#endif
 
 /* bodhi returns following json structure in case of error
 {
@@ -252,7 +210,7 @@ static void bodhi_print_errors_from_json(json_object *json)
             return;
         }
 
-        char *desc_item = NULL;
+        g_autofree char *desc_item = NULL;
         bodhi_read_value(error, "description", &desc_item, BODHI_READ_STR);
         if (!desc_item)
         {
@@ -262,11 +220,44 @@ static void bodhi_print_errors_from_json(json_object *json)
 
         error_msg("Error: %s", desc_item);
         json_object_put(error);
-        free(desc_item);
     }
 
     json_object_put(errors_array);
     return;
+}
+
+/**
+ * Parses only name from nvr
+ * nvr is RPM packages naming convention format: name-version-release
+ *
+ * for example: meanwhile3.34.3-3.34-3.fc666
+ *              ^name           ^ver.^release
+ */
+static int parse_nvr_name(const char *nvr, char **name)
+{
+    const int len = strlen(nvr);
+    if (len <= 0)
+        return EINVAL;
+    const char *c = nvr + len - 1;
+    /* skip release */
+    for (; *c != '-'; --c)
+    {
+        if (c <= nvr)
+            return EINVAL;
+    }
+    --c;
+    /* skip version */
+    for (; *c != '-'; --c)
+    {
+        if (c <= nvr)
+            return EINVAL;
+    }
+    if (c <= nvr)
+        return EINVAL;
+
+    *name = g_strndup(nvr, (c - nvr));
+
+    return 0;
 }
 
 static GHashTable *bodhi_parse_json(json_object *json, const char *release)
@@ -299,7 +290,8 @@ static GHashTable *bodhi_parse_json(json_object *json, const char *release)
         if (!builds_item) /* broken json */
             continue;
 
-        int karma, unstable_karma;
+        int karma = 0;
+        int unstable_karma = 0;
         bodhi_read_value(updates_item, "karma", &karma, BODHI_READ_INT);
         bodhi_read_value(updates_item, "unstable_karma", &unstable_karma, BODHI_READ_INT);
         if (karma <= unstable_karma)
@@ -309,22 +301,17 @@ static GHashTable *bodhi_parse_json(json_object *json, const char *release)
         int builds_len = json_object_array_length(builds_item);
         for (int k = 0; k < builds_len; ++k)
         {
-            b = xzalloc(sizeof(struct bodhi));
+            b = g_new0(struct bodhi, 1);
 
             char *name = NULL;
-            long ign_e;
-            char *ign_v, *ign_r, *ign_a;
-
             json_object *build = json_object_array_get_idx(builds_item, k);
 
             bodhi_read_value(build, "nvr", &b->nvr, BODHI_READ_STR);
 
-            if (hy_split_nevra(b->nvr, &name, &ign_e, &ign_v, &ign_r, &ign_a))
-                error_msg_and_die("hawkey failed to parse '%s'", b->nvr);
+            if (parse_nvr_name(b->nvr, &name))
+                error_msg_and_die("failed to parse package name from nvr: '%s'", b->nvr);
 
-            free(ign_v);
-            free(ign_r);
-            free(ign_a);
+            log_info("Found package: %s\n", name);
 
             struct bodhi *bodhi_tbl_item = g_hash_table_lookup(bodhi_table, name);
             if (bodhi_tbl_item && rpmvercmp(bodhi_tbl_item->nvr, b->nvr) > 0)
@@ -334,29 +321,6 @@ static GHashTable *bodhi_parse_json(json_object *json, const char *release)
             }
             g_hash_table_replace(bodhi_table, name, b);
         }
-
-#if 0
-        bodhi_read_value(updates_item, "date_pushed", &b->date_pushed, BODHI_READ_STR);
-        bodhi_read_value(updates_item, "status", &b->status, BODHI_READ_STR);
-
-        json_object *release_item = NULL;
-        bodhi_read_value(updates_item, "release", &release_item, BODHI_READ_JSON_OBJ);
-        if (release_item)
-            bodhi_read_value(release_item, "dist_tag", &b->dist_tag, BODHI_READ_STR);
-
-        json_object *bugs = NULL;
-        bodhi_read_value(updates_item, "bugs", &release_item, BODHI_READ_JSON_OBJ);
-        if (bugs)
-        {
-            for (int j = 0; j < json_object_array_length(bugs); ++j)
-            {
-                int *bz_id = xmalloc(sizeof(int));
-                json_object *bug_item = json_object_array_get_idx(bugs, j);
-                bodhi_read_value(bug_item, "bz_id", bz_id, BODHI_READ_INT);
-                b->bz_ids = g_list_append(b->bz_ids, bz_id);
-            }
-        }
-#endif
     }
 
     return bodhi_table;
@@ -364,7 +328,7 @@ static GHashTable *bodhi_parse_json(json_object *json, const char *release)
 
 static GHashTable *bodhi_query_list(const char *query, const char *release)
 {
-    char *bodhi_url_bugs = xasprintf("%s/?%s", bodhi_url, query);
+    g_autofree char *bodhi_url_bugs = g_strdup_printf("%s/?%s", bodhi_url, query);
 
     post_state_t *post_state = new_post_state(POST_WANT_BODY
                                               | POST_WANT_SSL_VERIFY
@@ -384,12 +348,11 @@ static GHashTable *bodhi_query_list(const char *query, const char *release)
         if (errmsg && errmsg[0])
             error_msg_and_die("%s '%s'", errmsg, bodhi_url_bugs);
     }
-    free(bodhi_url_bugs);
 
-//    log("%s", post_state->body);
+//    log_warning("%s", post_state->body);
 
     json_object *json = json_tokener_parse(post_state->body);
-    if (is_error(json))
+    if (json == NULL)
         error_msg_and_die("fatal: unable parse response from bodhi server");
 
     /* we must check the http_resp_code because only error responses contain
@@ -397,14 +360,13 @@ static GHashTable *bodhi_query_list(const char *query, const char *release)
      * the case it did not found the item */
     if (post_state->http_resp_code != 200)
     {
-        char *status_item = NULL;
+        g_autofree char *status_item = NULL;
         bodhi_read_value(json, "status", &status_item, BODHI_READ_STR);
         if (status_item != NULL && strcmp(status_item, "error") == 0)
         {
-            free(status_item);
             bodhi_print_errors_from_json(json);
             json_object_put(json);
-            xfunc_die(); // error_msg are printed in bodhi_print_errors_from_json
+            libreport_xfunc_die(); // error_msg are printed in bodhi_print_errors_from_json
         }
     }
 
@@ -462,7 +424,7 @@ int main(int argc, char **argv)
     const char *bugs = NULL, *release = NULL, *dump_dir_path = ".";
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT__DUMP_DIR(&dump_dir_path),
         OPT_GROUP(""),
         OPT_STRING('b', "bugs", &bugs, "ID1[,ID2,...]" , _("List of bug ids")),
@@ -477,14 +439,14 @@ int main(int argc, char **argv)
         "Search for updates on bodhi server"
     );
 
-    unsigned opts =  parse_opts(argc, argv, program_options, program_usage_string);
+    unsigned opts =  libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
     if (!bugs && !argv[optind])
-        show_usage_and_die(program_usage_string, program_options);
+        libreport_show_usage_and_die(program_usage_string, program_options);
 
-    struct strbuf *query = strbuf_new();
+    g_autoptr(GString) query = g_string_new(NULL);
     if (bugs)
-        query = strbuf_append_strf(query, "bugs=%s&", bugs);
+        g_string_append_printf(query, "bugs=%s&", bugs);
 
     if (opts & OPT_r)
     {
@@ -494,36 +456,32 @@ int main(int argc, char **argv)
             if (strcasecmp(release, "rawhide") == 0)
                 error_msg_and_die("Release \"%s\" is not supported",release);
 
-            query = strbuf_append_strf(query, "releases=%s&", release);
+            g_string_append_printf(query, "releases=%s&", release);
         }
         else
         {
             struct dump_dir *dd = dd_opendir(dump_dir_path, DD_OPEN_READONLY);
             if (!dd)
-                xfunc_die();
+                libreport_xfunc_die();
 
             problem_data_t *problem_data = create_problem_data_from_dump_dir(dd);
             dd_close(dd);
             if (!problem_data)
-                xfunc_die(); /* create_problem_data_for_reporting already emitted error msg */
+                libreport_xfunc_die(); /* create_problem_data_for_reporting already emitted error msg */
 
-            char *product, *version;
-            map_string_t *osinfo = new_map_string();
+            g_autofree char *product = NULL;
+            g_autofree char *version = NULL;
+            g_autoptr(GHashTable) osinfo = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
             problem_data_get_osinfo(problem_data, osinfo);
-            parse_osinfo_for_rhts(osinfo, &product, &version);
+            libreport_parse_osinfo_for_bz(osinfo, &product, &version);
 
             /* There are no bodhi updates for Rawhide */
             bool rawhide = strcasecmp(version, "rawhide") == 0;
             if (!rawhide)
-                query = strbuf_append_strf(query, "releases=f%s&", version);
-
-            free(product);
-            free(version);
-            free_map_string(osinfo);
+                g_string_append_printf(query, "releases=f%s&", version);
 
             if (rawhide)
             {
-                strbuf_free(query);
                 error_msg_and_die("Release \"Rawhide\" is not supported");
             }
         }
@@ -531,21 +489,19 @@ int main(int argc, char **argv)
 
     if (argv[optind])
     {
-        char *escaped = g_uri_escape_string(argv[optind], NULL, 0);
-        query = strbuf_append_strf(query, "packages=%s&", escaped);
-        free(escaped);
+        g_autofree char *escaped = g_uri_escape_string(argv[optind], NULL, 0);
+        g_string_append_printf(query, "packages=%s&", escaped);
     }
 
-    if (query->buf[query->len - 1] == '&')
-        query->buf[query->len - 1] = '\0';
+    if (query->str[query->len - 1] == '&')
+        query->str[query->len - 1] = '\0';
 
-    log(_("Searching for updates"));
-    GHashTable *update_hash_tbl = bodhi_query_list(query->buf, release);
-    strbuf_free(query);
+    log_warning(_("Searching for updates"));
+    GHashTable *update_hash_tbl = bodhi_query_list(query->str, release);
 
     if (!update_hash_tbl || !g_hash_table_size(update_hash_tbl))
     {
-        log(_("No updates for this package found"));
+        log_warning(_("No updates for this package found"));
         /*if (update_hash_tbl) g_hash_table_unref(update_hash_tbl);*/
         return 0;
     }
@@ -553,28 +509,25 @@ int main(int argc, char **argv)
     GHashTableIter iter;
     char *name;
     struct bodhi *b;
-    struct strbuf *q = strbuf_new();
+    GString *q = g_string_new(NULL);
     g_hash_table_iter_init(&iter, update_hash_tbl);
     while (g_hash_table_iter_next(&iter, (void **) &name, (void **) &b))
     {
-        char *installed_pkg_nvr = rpm_get_nvr_by_pkg_name(name);
+        g_autofree char *installed_pkg_nvr = rpm_get_nvr_by_pkg_name(name);
         if (installed_pkg_nvr && rpmvercmp(installed_pkg_nvr, b->nvr) >= 0)
         {
             log_info("Update %s is older or same as local version %s, skipping", b->nvr, installed_pkg_nvr);
-            free(installed_pkg_nvr);
             continue;
         }
-        free(installed_pkg_nvr);
 
-        strbuf_append_strf(q, " %s", b->nvr);
+        g_string_append_printf(q, " %s", b->nvr);
     }
 
     /*g_hash_table_unref(update_hash_tbl);*/
 
     if (!q->len)
     {
-        /*strbuf_free(q);*/
-        log(_("Local version of the package is newer than available updates"));
+        log_warning(_("Local version of the package is newer than available updates"));
         return 0;
     }
 
@@ -587,16 +540,25 @@ int main(int argc, char **argv)
      * There are other tools (pkcon et al) which might be somewhat more
      * convenient (for example, they might be usable from non-root), but they
      * might be not present on the system, may evolve or be superseded,
-     * while yum is unlikely to do so.
+     * as it did happen to yum.
      */
-    strbuf_prepend_str(q, "yum update --enablerepo=fedora --enablerepo=updates-testing");
 
-    char *msg = xasprintf(_("An update exists which might fix your problem. "
-                "You can install it by running: %s. "
-                "Do you want to continue with reporting the bug?"),
-                q->buf
+    g_autoptr(GHashTable) settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    abrt_load_abrt_plugin_conf_file("CCpp.conf", settings);
+
+    const char *value;
+    g_string_prepend(q, " update --enablerepo=fedora --enablerepo=updates --enablerepo=updates-testing");
+    value = g_hash_table_lookup(settings, "PackageManager");
+    if (value)
+        g_string_prepend(q, value);
+    else
+        g_string_prepend(q, DEFAULT_PACKAGE_MANAGER);
+
+    char *msg = g_strdup_printf(_("An update exists which might fix your problem. "
+                                  "You can install it by running: %s. "
+                                  "Do you want to continue with reporting the bug?"),
+                                q->str
     );
-    /*strbuf_free(q);*/
 
-    return ask_yes_no(msg) ? 0 : EXIT_STOP_EVENT_RUN;
+    return libreport_ask_yes_no(msg) ? 0 : EXIT_STOP_EVENT_RUN;
 }

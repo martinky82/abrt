@@ -19,6 +19,13 @@
 #include "libabrt.h"
 #include "rpm.h"
 
+#ifdef HAVE_LIBRPM
+#include <rpm/rpmts.h>
+#include <rpm/rpmcli.h>
+#include <rpm/rpmdb.h>
+#include <rpm/rpmpgp.h>
+#endif
+
 /**
 * A set, which contains finger prints.
 */
@@ -34,7 +41,7 @@ char* get_package_name_from_NVR_or_NULL(const char* packageNVR)
     if (packageNVR != NULL)
     {
         log_notice("packageNVR %s", packageNVR);
-        package_name = xstrdup(packageNVR);
+        package_name = g_strdup(packageNVR);
         char *pos = strrchr(package_name, '-');
         if (pos != NULL)
         {
@@ -51,56 +58,70 @@ char* get_package_name_from_NVR_or_NULL(const char* packageNVR)
 
 void rpm_init()
 {
+#ifdef HAVE_LIBRPM
     if (rpmReadConfigFiles(NULL, NULL) != 0)
         error_msg("Can't read RPM rc files");
+#endif
 
-    list_free_with_free(list_fingerprints); /* paranoia */
+    g_list_free_full(list_fingerprints, free);
     /* Huh? Why do we start the list with an element with NULL string? */
     list_fingerprints = g_list_alloc();
 }
 
 void rpm_destroy()
 {
+#ifdef HAVE_LIBRPM
     /* Mirroring the order of deinit calls in rpm-4.11.1/lib/poptALL.c::rpmcliFini() */
     rpmFreeCrypto();
     rpmFreeMacros(NULL);
     rpmFreeRpmrc();
+#endif
 
-    /* RPM doc says "clean up any open iterators and databases".
-     * Observed to eliminate these Berkeley DB warnings:
-     * "BDB2053 Freeing read locks for locker 0x1e0: 28718/139661746636736"
-     */
-    rpmdbCheckTerminate(1);
-
-    list_free_with_free(list_fingerprints);
-    list_fingerprints = NULL;
+    g_list_free_full(g_steal_pointer(&list_fingerprints), free);
 }
 
 void rpm_load_gpgkey(const char* filename)
 {
-    uint8_t *pkt = NULL;
+#ifdef HAVE_LIBRPM
+    g_autofree uint8_t *pkt = NULL;
     size_t pklen;
     if (pgpReadPkts(filename, &pkt, &pklen) != PGPARMOR_PUBKEY)
     {
-        free(pkt);
         error_msg("Can't load public GPG key %s", filename);
         return;
     }
 
     uint8_t keyID[8];
-    if (pgpPubkeyFingerprint(pkt, pklen, keyID) == 0)
+    if (pgpPubkeyKeyID(pkt, pklen, keyID) == 0)
     {
         char *fingerprint = pgpHexStr(keyID, sizeof(keyID));
         if (fingerprint != NULL)
             list_fingerprints = g_list_append(list_fingerprints, fingerprint);
     }
-    free(pkt);
+#else
+    return;
+#endif
 }
 
 int rpm_chk_fingerprint(const char* pkg)
 {
-    int ret = 0;
-    char *pgpsig = NULL;
+    g_autofree char *fingerprint = rpm_get_fingerprint(pkg);
+    int res = 0;
+    if (fingerprint)
+        res = rpm_fingerprint_is_imported(fingerprint);
+    return res;
+}
+
+int rpm_fingerprint_is_imported(const char* fingerprint)
+{
+    return !!g_list_find_custom(list_fingerprints, fingerprint, (GCompareFunc)g_strcmp0);
+}
+
+char *rpm_get_fingerprint(const char *pkg)
+{
+#ifdef HAVE_LIBRPM
+    char *fingerprint = NULL;
+    g_autofree char *pgpsig = NULL;
     const char *errmsg = NULL;
 
     rpmts ts = rpmtsCreate();
@@ -111,26 +132,24 @@ int rpm_chk_fingerprint(const char* pkg)
         goto error;
 
     pgpsig = headerFormat(header, "%|SIGGPG?{%{SIGGPG:pgpsig}}:{%{SIGPGP:pgpsig}}|", &errmsg);
-    if (!pgpsig && errmsg)
+    if (!pgpsig)
     {
-        log_notice("cannot get siggpg:pgpsig. reason: %s", errmsg);
+        log_notice("cannot get siggpg:pgpsig. reason: %s",
+                   errmsg ? errmsg : "unknown");
         goto error;
     }
 
-    {
-        char *pgpsig_tmp = strstr(pgpsig, " Key ID ");
-        if (pgpsig_tmp)
-        {
-            pgpsig_tmp += sizeof(" Key ID ") - 1;
-            ret = g_list_find_custom(list_fingerprints, pgpsig_tmp, (GCompareFunc)g_strcmp0) != NULL;
-        }
-    }
+    char *pgpsig_tmp = strstr(pgpsig, " Key ID ");
+    if (pgpsig_tmp)
+        fingerprint = g_strdup(pgpsig_tmp + sizeof(" Key ID ") - 1);
 
 error:
-    free(pgpsig);
     rpmdbFreeIterator(iter);
     rpmtsFree(ts);
-    return ret;
+    return fingerprint;
+#else
+    return NULL;
+#endif
 }
 
 /*
@@ -173,6 +192,7 @@ error:
 }
 */
 
+#ifdef HAVE_LIBRPM
 static int rpm_query_file(rpmts *ts, rpmdbMatchIterator *iter, Header *header,
         const char *filename, const char *rootdir_or_NULL)
 {
@@ -206,11 +226,13 @@ static int rpm_query_file(rpmts *ts, rpmdbMatchIterator *iter, Header *header,
 
     return 0;
 }
+#endif
 
 char* rpm_get_component(const char *filename, const char *rootdir_or_NULL)
 {
+#ifdef HAVE_LIBRPM
     char *ret = NULL;
-    char *srpm = NULL;
+    g_autofree char *srpm = NULL;
     rpmts ts;
     rpmdbMatchIterator iter;
     Header header;
@@ -230,16 +252,19 @@ char* rpm_get_component(const char *filename, const char *rootdir_or_NULL)
     }
 
     ret = get_package_name_from_NVR_or_NULL(srpm);
-    free(srpm);
 
  error:
     rpmdbFreeIterator(iter);
     rpmtsFree(ts);
     return ret;
+#else
+    return NULL;
+#endif
 }
 
+#ifdef HAVE_LIBRPM
 #define pkg_add_id(name)                                                \
-    static inline int pkg_add_##name(Header header, struct pkg_envra *p) \
+    static inline int pkg_add_##name(Header header, struct pkg_nevra *p) \
     {                                                                   \
         const char *errmsg = NULL;                                      \
         p->p_##name = headerFormat(header, "%{"#name"}", &errmsg);      \
@@ -251,20 +276,23 @@ char* rpm_get_component(const char *filename, const char *rootdir_or_NULL)
         return -1;                                                      \
     }                                                                   \
 
-pkg_add_id(epoch);
 pkg_add_id(name);
+pkg_add_id(epoch);
 pkg_add_id(version);
 pkg_add_id(release);
 pkg_add_id(arch);
+pkg_add_id(vendor);
+#endif
 
 // caller is responsible to free returned value
-struct pkg_envra *rpm_get_package_nvr(const char *filename, const char *rootdir_or_NULL)
+struct pkg_nevra *rpm_get_package_nvr(const char *filename, const char *rootdir_or_NULL)
 {
+#ifdef HAVE_LIBRPM
     rpmts ts;
     rpmdbMatchIterator iter;
     Header header;
 
-    struct pkg_envra *p = NULL;
+    struct pkg_nevra *p = NULL;
 
     if (rpm_query_file(&ts, &iter, &header, filename, rootdir_or_NULL) < 0)
         return NULL;
@@ -272,8 +300,13 @@ struct pkg_envra *rpm_get_package_nvr(const char *filename, const char *rootdir_
     if (!header)
         goto error;
 
-    p = xzalloc(sizeof(*p));
+    p = g_new0(struct pkg_nevra, 1);
     int r;
+
+    r = pkg_add_name(header, p);
+    if (r)
+        goto error;
+
     r = pkg_add_epoch(header, p);
     if (r)
         goto error;
@@ -284,12 +317,8 @@ struct pkg_envra *rpm_get_package_nvr(const char *filename, const char *rootdir_
     if (!strncmp(p->p_epoch, "(none)", strlen("(none)")))
     {
         free(p->p_epoch);
-        p->p_epoch = xstrdup("0");
+        p->p_epoch = g_strdup("0");
     }
-
-    r = pkg_add_name(header, p);
-    if (r)
-        goto error;
 
     r = pkg_add_version(header, p);
     if (r)
@@ -303,27 +332,38 @@ struct pkg_envra *rpm_get_package_nvr(const char *filename, const char *rootdir_
     if (r)
         goto error;
 
-    p->p_nvr = xasprintf("%s-%s-%s", p->p_name, p->p_version, p->p_release);
+    r = pkg_add_vendor(header, p);
+    if (r)
+        goto error;
+
+    if (strcmp(p->p_epoch, "0") == 0)
+        p->p_nvr = g_strdup_printf("%s-%s-%s", p->p_name, p->p_version, p->p_release);
+    else
+        p->p_nvr = g_strdup_printf("%s-%s:%s-%s", p->p_name, p->p_epoch, p->p_version, p->p_release);
 
     rpmdbFreeIterator(iter);
     rpmtsFree(ts);
     return p;
 
  error:
-    free_pkg_envra(p);
+    free_pkg_nevra(p);
 
     rpmdbFreeIterator(iter);
     rpmtsFree(ts);
     return NULL;
+#else
+    return NULL;
+#endif
 }
 
-void free_pkg_envra(struct pkg_envra *p)
+void free_pkg_nevra(struct pkg_nevra *p)
 {
     if (!p)
         return;
 
-    free(p->p_epoch);
+    free(p->p_vendor);
     free(p->p_name);
+    free(p->p_epoch);
     free(p->p_version);
     free(p->p_release);
     free(p->p_arch);

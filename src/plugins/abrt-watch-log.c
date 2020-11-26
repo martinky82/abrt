@@ -17,11 +17,13 @@
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 #include <sys/inotify.h>
+#include <spawn.h>
 #include "libabrt.h"
 
 #define MAX_SCAN_BLOCK  (4*1024*1024)
 #define READ_AHEAD          (10*1024)
 
+extern char **environ;
 static unsigned page_size;
 
 static bool memstr(void *buf, unsigned size, const char *str)
@@ -29,16 +31,16 @@ static bool memstr(void *buf, unsigned size, const char *str)
     int len = strlen(str);
     while ((int)size >= len)
     {
-        //log("LOOKING FOR:'%s'", str);
+        //log_warning("LOOKING FOR:'%s'", str);
         char *first = memchr(buf, (unsigned char)str[0], size - len + 1);
         if (!first)
             break;
-        //log("FOUND:'%.66s'", first);
+        //log_warning("FOUND:'%.66s'", first);
         first++;
         if (len <= 1 || strncmp(first, str + 1, len - 1) == 0)
             return true;
         size -= (first - (char*)buf);
-        //log("SKIP TO:'%.66s' %d chars", first, (int)(first - (char*)buf));
+        //log_warning("SKIP TO:'%.66s' %d chars", first, (int)(first - (char*)buf));
         buf = first;
     }
     return false;
@@ -46,6 +48,12 @@ static bool memstr(void *buf, unsigned size, const char *str)
 
 static void run_scanner_prog(int fd, struct stat *statbuf, GList *match_list, char **prog)
 {
+    pid_t pid;
+    int err;
+    int attr_set = 0, fd_actions_set = 0;
+    posix_spawnattr_t attr;
+    posix_spawn_file_actions_t fd_actions;
+
     /* fstat(fd, &statbuf) was just done by caller */
 
     off_t cur_pos = lseek(fd, 0, SEEK_CUR);
@@ -98,18 +106,33 @@ static void run_scanner_prog(int fd, struct stat *statbuf, GList *match_list, ch
     }
 
     fflush(NULL); /* paranoia */
-    pid_t pid = vfork();
-    if (pid < 0)
-        perror_msg_and_die("vfork");
-    if (pid == 0)
+
+    if ((err = posix_spawn_file_actions_init(&fd_actions)) != 0
+#ifdef POSIX_SPAWN_USEVFORK
+         || (err = posix_spawnattr_init(&attr)) != 0
+         || (attr_set = 1,
+             err = posix_spawnattr_setflags(&attr, POSIX_SPAWN_USEVFORK)) != 0
+#endif
+         || (fd_actions_set = 1,
+             err = posix_spawn_file_actions_adddup2(&fd_actions, fd, STDIN_FILENO)) != 0)
     {
-        xmove_fd(fd, STDIN_FILENO);
-        log_debug("Execing '%s'", prog[0]);
-        execvp(prog[0], prog);
-        perror_msg_and_die("Can't execute '%s'", prog[0]);
+        if (attr_set == 1)
+            posix_spawnattr_destroy(&attr);
+
+        if (fd_actions_set == 1)
+            posix_spawn_file_actions_destroy(&fd_actions);
+
+        perror_msg_and_die("posix_spawn init");
     }
 
-    safe_waitpid(pid, NULL, 0);
+    if ((err = posix_spawnp(&pid, prog[0], &fd_actions, &attr, prog, environ)) != 0)
+        perror_msg_and_die(_("Can't execute '%s'"), prog[0]);
+
+    if ((err = posix_spawn_file_actions_destroy(&fd_actions)) != 0
+         || ((attr_set == 1) && ((err = posix_spawnattr_destroy(&attr)) != 0)))
+         perror_msg_and_die("posix_spawn destroy");
+
+    libreport_safe_waitpid(pid, NULL, 0);
 
     /* Check fd's position, and move to end if it wasn't advanced.
      * This means that child failed to read its stdin.
@@ -117,7 +140,7 @@ static void run_scanner_prog(int fd, struct stat *statbuf, GList *match_list, ch
      */
     if (lseek(fd, 0, SEEK_CUR) <= cur_pos)
     {
-        log("Warning, '%s' did not process its input", prog[0]);
+        log_warning("Warning, '%s' did not process its input", prog[0]);
         lseek(fd, statbuf->st_size, SEEK_SET);
     }
 }
@@ -149,24 +172,24 @@ int main(int argc, char **argv)
     };
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_BOOL('s', NULL, NULL              , _("Log to syslog")),
         OPT_LIST('F', NULL, &match_list, "STR", _("Don't run PROG if STRs aren't found")),
         OPT_END()
     };
-    unsigned opts = parse_opts(argc, argv, program_options, program_usage_string);
+    unsigned opts = libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
-    msg_prefix = g_progname;
+    libreport_msg_prefix = libreport_g_progname;
     if ((opts & OPT_s) || getenv("ABRT_SYSLOG"))
     {
-        logmode = LOGMODE_JOURNAL;
+        libreport_logmode = LOGMODE_JOURNAL;
     }
 
     argv += optind;
     if (!argv[0] || !argv[1])
-        show_usage_and_die(program_usage_string, program_options);
+        libreport_show_usage_and_die(program_usage_string, program_options);
 
     /* We want to support -F "`echo foo; echo bar`" -
      * need to split strings by newline, and be careful about
@@ -189,7 +212,7 @@ int main(int argc, char **argv)
     int inotify_fd = inotify_init();
     if (inotify_fd == -1)
         perror_msg_and_die("inotify_init failed");
-    close_on_exec_on(inotify_fd);
+    libreport_close_on_exec_on(inotify_fd);
 
     struct stat statbuf;
     int file_fd = -1;

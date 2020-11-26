@@ -51,7 +51,7 @@ static GList *insert_name_and_sizes(GList *list, const char *name, double wsa, o
 
     if (cur != list || list_len < MAX_VICTIM_LIST_SIZE)
     {
-        ns = xmalloc(sizeof(*ns) + strlen(name));
+        ns = g_malloc(sizeof(*ns) + strlen(name));
         ns->weighted_size_and_age = wsa;
         ns->size = sz;
         strcpy(ns->name, name);
@@ -81,10 +81,10 @@ static double get_dir_size(const char *dirname,
     double size = 0;
     while ((dent = readdir(dp)) != NULL)
     {
-        if (dot_or_dotdot(dent->d_name))
+        if (libreport_dot_or_dotdot(dent->d_name))
             continue;
 
-        char *fullname = concat_path_file(dirname, dent->d_name);
+        g_autofree char *fullname = g_build_filename(dirname, dent->d_name, NULL);
         struct stat stats;
         if (lstat(fullname, &stats) != 0)
             goto next;
@@ -108,7 +108,7 @@ static double get_dir_size(const char *dirname,
                 GList *cur = preserve_files_list;
                 while (cur)
                 {
-                    //log("'%s' ? '%s'", fullname, *pp);
+                    //log_warning("'%s' ? '%s'", fullname, *pp);
                     if (strcmp(fullname, (char*)cur->data) == 0)
                         goto next;
                     cur = cur->next;
@@ -125,7 +125,7 @@ static double get_dir_size(const char *dirname,
             }
         }
  next:
-        free(fullname);
+        continue;
     }
     closedir(dp);
 
@@ -162,7 +162,7 @@ static void delete_dirs(gpointer data, gpointer exclude_path)
     double cap_size;
     const char *dir = parse_size_pfx(&cap_size, data);
 
-    trim_problem_dirs(dir, cap_size, exclude_path);
+    abrt_trim_problem_dirs(dir, cap_size, exclude_path);
 }
 
 static void delete_files(gpointer data, gpointer void_preserve_list)
@@ -179,7 +179,7 @@ static void delete_files(gpointer data, gpointer void_preserve_list)
 
         if (cur_size <= cap_size || !worst_file_list)
         {
-            list_free_with_free(worst_file_list);
+            g_list_free_full(g_steal_pointer(&worst_file_list), free);
             log_info("cur_size:%.0f cap_size:%.0f, no (more) trimming", cur_size, cap_size);
             break;
         }
@@ -232,22 +232,22 @@ int main(int argc, char **argv)
     };
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_LIST('d'  , NULL, &dir_list , "SIZE:DIR", _("Delete whole problem directories")),
         OPT_LIST('f'  , NULL, &file_list, "SIZE:DIR", _("Delete files inside this directory")),
         OPT_STRING('p', NULL, &preserve,  "DIR"     , _("Preserve this directory")),
         OPT_END()
     };
-    /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
+    /*unsigned opts =*/ libreport_parse_opts(argc, argv, program_options, program_usage_string);
     argv += optind;
     if ((argv[0] && !file_list)
      || !(dir_list || file_list)
     ) {
-        show_usage_and_die(program_usage_string, program_options);
+        libreport_show_usage_and_die(program_usage_string, program_options);
     }
 
     /* We don't have children, so this is not needed: */
-    //export_abrt_envvars(/*set_pfx:*/ 0);
+    //libreport_export_abrt_envvars(/*set_pfx:*/ 0);
 
     /* Preserve not only files specified on command line, but,
      * if they are symlinks, preserve also the real files they point to:
@@ -257,18 +257,16 @@ int main(int argc, char **argv)
     {
         char *name = *argv++;
         /* Since we don't bother freeing preserve_files_list on exit,
-         * we take a shortcut and insert name instead of xstrdup(name)
+         * we take a shortcut and insert name instead of g_strdup(name)
          * in the next line:
          */
         preserve_files_list = g_list_prepend(preserve_files_list, name);
 
-        char *rp = realpath(name, NULL);
+        g_autofree char *rp = realpath(name, NULL);
         if (rp)
         {
             if (strcmp(rp, name) != 0)
                 preserve_files_list = g_list_prepend(preserve_files_list, rp);
-            else
-                free(rp);
         }
     }
     /* Not really necessary, but helps to reduce confusion when debugging */

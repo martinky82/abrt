@@ -1,3 +1,4 @@
+#!/bin/sh
 # If shell is not connect to a terminal, return immediately, because this script
 # should print out ABRT's status and it is senseless to continue without
 # terminal.
@@ -25,18 +26,20 @@ if [ ! -f "$LPATHDIR" ]; then
     mkdir -p "$LPATHDIR" >"$ABRT_DEBUG_LOG" 2>&1 || return 0
 fi
 
-TMPPATH=`mktemp --tmpdir="$LPATHDIR" lastnotification.XXXXXXXX 2> "$ABRT_DEBUG_LOG"`
+TMPPATH=$(mktemp --tmpdir="$LPATHDIR" lastnotification.XXXXXXXX 2> "$ABRT_DEBUG_LOG")
 
 SINCE=0
 if [ -f "$SINCEFILE" ]; then
-    SINCE=`cat $SINCEFILE 2>"$ABRT_DEBUG_LOG"`
+    SINCE=$(tail -n1 "$SINCEFILE" 2>"$ABRT_DEBUG_LOG")
 fi
 
 # always update the lastnotification
 if [ -f "$TMPPATH" ]; then
     # Be quite in case of errors and don't scare users by strange error messages.
-    date +%s > "$TMPPATH" 2>"$ABRT_DEBUG_LOG"
+    date +%s 2>"$ABRT_DEBUG_LOG" >> "$TMPPATH"
     mv -f "$TMPPATH" "$SINCEFILE" >"$ABRT_DEBUG_LOG" 2>&1
 fi
 
-timeout 10s abrt-cli status --since="$SINCE" 2>"$ABRT_DEBUG_LOG" || echo "'abrt-cli status' timed out"
+timeout 10s abrt status --since="$SINCE" --not-reported --quiet 2>"$ABRT_DEBUG_LOG" || echo "'abrt status' timed out"
+
+unset ABRT_DEBUG_LOG LPATHDIR SINCEFILE TMPPATH SINCE

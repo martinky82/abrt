@@ -32,7 +32,7 @@ for test_dir in $testlist; do
         n_post=$( find $ABRT_CONF_DUMP_LOCATION -mindepth 1 -type d | wc -l )
         if [ $n_post -gt 0 ]; then
             mkdir "$outdir/post_crashes"
-            for dir in $( find $ABRT_CONF_DUMP_LOCATION  -mindepth 1 -type d ); do
+            for dir in $( find $ABRT_CONF_DUMP_LOCATION  -mindepth 1 -maxdepth 1 -type d ); do
                 # do not store crashes that are too big
                 if [ $( du -s "$dir" | awk '{ print $1 }' ) -lt 100000 ]; then
                     mv "$dir" "$outdir/post_crashes/"
@@ -60,8 +60,8 @@ for test_dir in $testlist; do
     fi
 
     # collect /var/log/messages
-    start=$( grep -n "MARK: $short_testname.*" '/var/log/messages'  | tail -n 1 | awk -F: '{print $1}' )
-    end=$( grep -n "MARK: End: $short_testname.*" '/var/log/messages'  | tail -n 1 | awk -F: '{print $1}' )
+    start=$( grep -n --text "MARK: $short_testname.*" '/var/log/messages'  | tail -n 1 | awk -F: '{print $1}' )
+    end=$( grep -n --text "MARK: End: $short_testname.*" '/var/log/messages'  | tail -n 1 | awk -F: '{print $1}' )
     start=$[ $start + 2 ]
     end=$[ $end - 2 ]
 
@@ -89,7 +89,7 @@ for test_dir in $testlist; do
     # check test result
     test_result="FAIL"
     if [ -e $logfile ]; then
-        if ! grep -q FAIL $logfile; then
+        if ! grep -qE "FAIL(\s|$)" $logfile; then
             test_result="PASS"
         fi
     fi

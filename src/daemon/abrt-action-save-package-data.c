@@ -17,82 +17,127 @@
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 #include <fnmatch.h>
+#include <glib.h>
 #include "libabrt.h"
 #include "rpm.h"
 
 #define GPG_CONF "gpg_keys.conf"
+#define DEFAULT_BLACKLISTED_PATHS "/usr/share/doc/*, */example*, " \
+    "/usr/bin/nspluginviewer, /usr/lib*/firefox/plugin-container"
+#define DEFAULT_BLACKLISTED_PKGS "bash, mono-core, nspluginwrapper, strace, valgrind"
+#define DEFAULT_GPG_KEYS_DIR "/etc/pki/rpm-gpg"
+/**
+  * The regexes should cover interpreters with basename:
+  * Python:
+  *   python
+  *   python2
+  *   python3
+  *   python2.7
+  *   python3.8
+  *   platform-python
+  *   platform-python3
+  *   platform-python3.8
+  *
+  * Perl:
+  *   perl
+  *   perl5.30.1
+  *
+  * PHP:
+  *   php
+  *   php-cgi
+  *
+  * R:
+  *   R
+  *
+  * tcl:
+  *   tclsh
+  *   tclsh8.6
+  **/
+#define DEFAULT_INTERPRETERS_REGEX \
+    "^(perl ([[:digit:]][.][[:digit:]]+[.][[:digit:]])? |" \
+    "php (-cgi)? |" \
+    "(platform-)? python ([[:digit:]]([.][[:digit:]])?)? |" \
+    "R |" \
+    "tclsh ([[:digit:]][.][[:digit:]])?)$"
 
-static bool   settings_bOpenGPGCheck = false;
+static bool   settings_bOpenGPGCheck = true;
 static GList *settings_setOpenGPGPublicKeys = NULL;
 static GList *settings_setBlackListedPkgs = NULL;
 static GList *settings_setBlackListedPaths = NULL;
 static bool   settings_bProcessUnpackaged = false;
 static GList *settings_Interpreters = NULL;
 
-static void ParseCommon(map_string_t *settings, const char *conf_filename)
+static void ParseCommon(GHashTable *settings, const char *conf_filename)
 {
-    const char *value;
+    gpointer value;
 
-    value = get_map_string_item_or_NULL(settings, "OpenGPGCheck");
+    value = g_hash_table_lookup(settings, "OpenGPGCheck");
     if (value)
     {
-        settings_bOpenGPGCheck = string_to_bool(value);
-        remove_map_string_item(settings, "OpenGPGCheck");
+        settings_bOpenGPGCheck = libreport_string_to_bool((char *)value);
+        g_hash_table_remove(settings, "OpenGPGCheck");
     }
 
-    value = get_map_string_item_or_NULL(settings, "BlackList");
+    value = g_hash_table_lookup(settings, "BlackList");
     if (value)
     {
-        settings_setBlackListedPkgs = parse_list(value);
-        remove_map_string_item(settings, "BlackList");
+        settings_setBlackListedPkgs = libreport_parse_delimited_list((char *)value, ",");
+        g_hash_table_remove(settings, "BlackList");
     }
+    else
+        settings_setBlackListedPkgs = libreport_parse_delimited_list(DEFAULT_BLACKLISTED_PKGS, ",");
 
-    value = get_map_string_item_or_NULL(settings, "BlackListedPaths");
+    value = g_hash_table_lookup(settings, "BlackListedPaths");
     if (value)
     {
-        settings_setBlackListedPaths = parse_list(value);
-        remove_map_string_item(settings, "BlackListedPaths");
+        settings_setBlackListedPaths = libreport_parse_delimited_list((char *)value, ",");
+        g_hash_table_remove(settings, "BlackListedPaths");
     }
+    else
+        settings_setBlackListedPaths = libreport_parse_delimited_list(DEFAULT_BLACKLISTED_PATHS, ",");
 
-    value = get_map_string_item_or_NULL(settings, "ProcessUnpackaged");
+    value = g_hash_table_lookup(settings, "ProcessUnpackaged");
     if (value)
     {
-        settings_bProcessUnpackaged = string_to_bool(value);
-        remove_map_string_item(settings, "ProcessUnpackaged");
+        settings_bProcessUnpackaged = libreport_string_to_bool((char *)value);
+        g_hash_table_remove(settings, "ProcessUnpackaged");
     }
 
-    value = get_map_string_item_or_NULL(settings, "Interpreters");
+    value = g_hash_table_lookup(settings, "Interpreters");
     if (value)
     {
-        settings_Interpreters = parse_list(value);
-        remove_map_string_item(settings, "Interpreters");
+        settings_Interpreters = libreport_parse_delimited_list((char *)value, ",");
+        g_hash_table_remove(settings, "Interpreters");
     }
 
-    map_string_iter_t iter;
-    const char *name;
-    /*char *value; - already declared */
-    init_map_string_iter(&iter, settings);
-    while (next_map_string_iter(&iter, &name, &value))
+    GHashTableIter iter;
+    gpointer name;
+    g_hash_table_iter_init(&iter, settings);
+    while (g_hash_table_iter_next(&iter, &name, &value))
     {
-        error_msg("Unrecognized variable '%s' in '%s'", name, conf_filename);
+        error_msg("Unrecognized variable '%s' in '%s'", (char *)name, conf_filename);
     }
 }
 
 static void load_gpg_keys(void)
 {
-    map_string_t *settings = new_map_string();
-    if (!load_abrt_conf_file(GPG_CONF, settings))
+    GHashTable *settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    if (!abrt_load_abrt_conf_file(GPG_CONF, settings))
     {
         error_msg("Can't load '%s'", GPG_CONF);
         return;
     }
 
-    const char *gpg_keys_dir = get_map_string_item_or_NULL(settings, "GPGKeysDir");
+    const char *gpg_keys_dir = g_hash_table_lookup(settings, "GPGKeysDir");
+    if (gpg_keys_dir == NULL)
+    {
+        gpg_keys_dir = DEFAULT_GPG_KEYS_DIR;
+    }
     if (gpg_keys_dir != NULL && strcmp(gpg_keys_dir, "") != 0)
     {
         log_debug("Reading gpg keys from '%s'", gpg_keys_dir);
-        GHashTable *done_set = g_hash_table_new(g_str_hash, g_str_equal);
-        GList *gpg_files = get_file_list(gpg_keys_dir, NULL /* we don't care about the file ext */);
+        g_autoptr(GHashTable) done_set = g_hash_table_new(g_str_hash, g_str_equal);
+        GList *gpg_files = libreport_get_file_list(gpg_keys_dir, NULL /* we don't care about the file ext */);
         for (GList *iter = gpg_files; iter; iter = g_list_next(iter))
         {
             const char *key_path = fo_get_fullpath((file_obj_t *)iter->data);
@@ -102,31 +147,29 @@ static void load_gpg_keys(void)
 
             g_hash_table_insert(done_set, (gpointer)key_path, NULL);
             log_debug("Loading gpg key '%s'", key_path);
-            settings_setOpenGPGPublicKeys = g_list_append(settings_setOpenGPGPublicKeys, xstrdup(key_path));
+            settings_setOpenGPGPublicKeys = g_list_append(settings_setOpenGPGPublicKeys, g_strdup(key_path));
         }
 
-        g_list_free_full(gpg_files, (GDestroyNotify)free_file_obj);
-        g_hash_table_destroy(done_set);
+        g_list_free_full(gpg_files, (GDestroyNotify)libreport_free_file_obj);
     }
 }
 
 static int load_conf(const char *conf_filename)
 {
-    map_string_t *settings = new_map_string();
+    g_autoptr(GHashTable) settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     if (conf_filename != NULL)
     {
-        if (!load_conf_file(conf_filename, settings, false))
+        if (!libreport_load_conf_file(conf_filename, settings, false))
             error_msg("Can't open '%s'", conf_filename);
     }
     else
     {
         conf_filename = "abrt-action-save-package-data.conf";
-        if (!load_abrt_conf_file(conf_filename, settings))
+        if (!abrt_load_abrt_conf_file(conf_filename, settings))
             error_msg("Can't load '%s'", conf_filename);
     }
 
     ParseCommon(settings, conf_filename);
-    free_map_string(settings);
 
     load_gpg_keys();
 
@@ -166,7 +209,7 @@ static char *get_argv1_if_full_path(const char* cmdline)
 
     /* good, it has "/foo/bar" form, return it */
     int len = strchrnul(argv1, ' ') - argv1;
-    return xstrndup(argv1, len);
+    return g_strndup(argv1, len);
 }
 
 static bool is_path_blacklisted(const char *path)
@@ -182,7 +225,7 @@ static bool is_path_blacklisted(const char *path)
     return false;
 }
 
-static struct pkg_envra *get_script_name(const char *cmdline, char **executable, const char *chroot)
+static struct pkg_nevra *get_script_name(const char *cmdline, char **executable, const char *chroot)
 {
 // TODO: we don't verify that python executable is not modified
 // or that python package is properly signed
@@ -191,7 +234,7 @@ static struct pkg_envra *get_script_name(const char *cmdline, char **executable,
      * This will work only if the cmdline contains the whole path.
      * Example: python /usr/bin/system-control-network
      */
-    struct pkg_envra *script_pkg = NULL;
+    struct pkg_nevra *script_pkg = NULL;
     char *script_name = get_argv1_if_full_path(cmdline);
     if (script_name)
     {
@@ -216,43 +259,60 @@ static int SavePackageDescriptionToDebugDump(const char *dump_dir_name, const ch
     if (!dd)
         return 1;
 
-    char *type = dd_load_text(dd, FILENAME_TYPE);
-    if (!strcmp(type, "Kerneloops"))
-    {
-        dd_save_text(dd, FILENAME_PACKAGE, "kernel");
-        dd_save_text(dd, FILENAME_COMPONENT, "kernel");
-        dd_close(dd);
-        free(type);
-        return 0;
-    }
-    free(type);
+    g_autofree char *type = dd_load_text(dd, FILENAME_TYPE);
+    bool kernel_oops = !strcmp(type, "Kerneloops") || !strcmp(type, "vmcore");
 
-    char *cmdline = NULL;
-    char *executable = NULL;
-    char *rootdir = NULL;
-    char *package_short_name = NULL;
-    struct pkg_envra *pkg_name = NULL;
-    char *component = NULL;
+    g_autofree char *cmdline = NULL;
+    g_autofree char *executable = NULL;
+    g_autofree char *rootdir = NULL;
+    g_autofree char *package_short_name = NULL;
+    g_autofree char *fingerprint = NULL;
+    struct pkg_nevra *pkg_name = NULL;
+    g_autofree char *component = NULL;
+    char *kernel = NULL;
     int error = 1;
     /* note: "goto ret" statements below free all the above variables,
      * but they don't dd_close(dd) */
 
-    cmdline = dd_load_text_ext(dd, FILENAME_CMDLINE, DD_FAIL_QUIETLY_ENOENT);
-    executable = dd_load_text(dd, FILENAME_EXECUTABLE);
+    if (kernel_oops)
+    {
+        kernel = dd_load_text(dd, FILENAME_KERNEL);
+        if (!kernel)
+        {
+            log_warning("File 'kernel' containing kernel version not "
+                "found in current directory");
+            goto ret;
+        }
+        /* Trim trailing white-spaces. */
+        strchrnul(kernel, ' ')[0] = '\0';
+
+        log_info("Looking for kernel package");
+        executable = g_strdup_printf("/boot/vmlinuz-%s", kernel);
+    }
+    else
+    {
+        cmdline = dd_load_text_ext(dd, FILENAME_CMDLINE, DD_FAIL_QUIETLY_ENOENT);
+        executable = dd_load_text(dd, FILENAME_EXECUTABLE);
+    }
+
 
     /* Do not implicitly query rpm database in process's root dir, if
      * ExploreChroots is disabled. */
-    if (g_settings_explorechroots && chroot == NULL)
+    if (abrt_g_settings_explorechroots && chroot == NULL)
         chroot = rootdir = dd_load_text_ext(dd, FILENAME_ROOTDIR,
                                DD_FAIL_QUIETLY_ENOENT | DD_LOAD_TEXT_RETURN_NULL_ON_FAILURE);
 
     /* Close dd while we query package database. It can take some time,
      * don't want to keep dd locked longer than necessary */
     dd_close(dd);
+    dd = NULL;
 
-    if (is_path_blacklisted(executable))
+    /* The check for kernel_oops is there because it could be an unexpected
+     * behaviour. If one wants to ignore kernel oops, she/he should disable
+     * the corresponding services. */
+    if (!kernel_oops && is_path_blacklisted(executable))
     {
-        log("Blacklisted executable '%s'", executable);
+        log_warning("Blacklisted executable '%s'", executable);
         goto ret; /* return 1 (failure) */
     }
 
@@ -265,12 +325,16 @@ static int SavePackageDescriptionToDebugDump(const char *dump_dir_name, const ch
                       "proceeding without packaging information", executable);
             goto ret0; /* no error */
         }
-        log("Executable '%s' doesn't belong to any package"
-		" and ProcessUnpackaged is set to 'no'",
-		executable
-        );
+        if (kernel_oops)
+            log_warning("Can't find kernel package corresponding to '%s'", kernel);
+        else
+            log_warning("Executable '%s' doesn't belong to any package"
+                " and ProcessUnpackaged is set to 'no'", executable);
         goto ret; /* return 1 (failure) */
     }
+
+    if (kernel_oops)
+        goto skip_interpreter;
 
     /* Check well-known interpreter names */
     const char *basename = strrchr(executable, '/');
@@ -282,13 +346,14 @@ static int SavePackageDescriptionToDebugDump(const char *dump_dir_name, const ch
     /* if basename is known interpreter, we want to blame the running script
      * not the interpreter
      */
-    if (g_list_find_custom(settings_Interpreters, basename, (GCompareFunc)g_strcmp0))
+    if (g_regex_match_simple(DEFAULT_INTERPRETERS_REGEX, basename, G_REGEX_EXTENDED, /*MatchFlags*/0) ||
+        g_list_find_custom(settings_Interpreters, basename, (GCompareFunc)g_strcmp0))
     {
-        struct pkg_envra *script_pkg = get_script_name(cmdline, &executable, chroot);
+        struct pkg_nevra *script_pkg = get_script_name(cmdline, &executable, chroot);
         /* executable may have changed, check it again */
         if (is_path_blacklisted(executable))
         {
-            log("Blacklisted executable '%s'", executable);
+            log_warning("Blacklisted executable '%s'", executable);
             goto ret; /* return 1 (failure) */
         }
         if (!script_pkg)
@@ -298,7 +363,7 @@ static int SavePackageDescriptionToDebugDump(const char *dump_dir_name, const ch
              */
             if (!settings_bProcessUnpackaged)
             {
-                log("Interpreter crashed, but no packaged script detected: '%s'", cmdline);
+                log_warning("Interpreter crashed, but no packaged script detected: '%s'", cmdline);
                 goto ret; /* return 1 (failure) */
             }
 
@@ -310,27 +375,29 @@ static int SavePackageDescriptionToDebugDump(const char *dump_dir_name, const ch
             goto ret0;
         }
 
-        free_pkg_envra(pkg_name);
+        free_pkg_nevra(pkg_name);
         pkg_name = script_pkg;
     }
 
-    package_short_name = xasprintf("%s", pkg_name->p_name);
+skip_interpreter:
+    package_short_name = g_strdup_printf("%s", pkg_name->p_name);
     log_info("Package:'%s' short:'%s'", pkg_name->p_nvr, package_short_name);
 
-
-    if (g_list_find_custom(settings_setBlackListedPkgs, package_short_name, (GCompareFunc)g_strcmp0))
+    /* The check for kernel_oops is there because it could be an unexpected
+     * behaviour. If one wants to ignore kernel oops, she/he should disable
+     * the corresponding services. */
+    if (!kernel_oops && g_list_find_custom(settings_setBlackListedPkgs, package_short_name, (GCompareFunc)g_strcmp0))
     {
-        log("Blacklisted package '%s'", package_short_name);
+        log_warning("Blacklisted package '%s'", package_short_name);
         goto ret; /* return 1 (failure) */
     }
 
-    if (settings_bOpenGPGCheck)
+    fingerprint = rpm_get_fingerprint(package_short_name);
+    if (!(fingerprint != NULL && rpm_fingerprint_is_imported(fingerprint))
+         && settings_bOpenGPGCheck)
     {
-        if (!rpm_chk_fingerprint(package_short_name))
-        {
-            log("Package '%s' isn't signed with proper key", package_short_name);
-            goto ret; /* return 1 (failure) */
-        }
+        log_warning("Package '%s' isn't signed with proper key", package_short_name);
+        goto ret; /* return 1 (failure) */
         /* We used to also check the integrity of the executable here:
          *  if (!CheckHash(package_short_name.c_str(), executable)) BOOM();
          * Checking the MD5 sum requires to run prelink to "un-prelink" the
@@ -353,22 +420,39 @@ static int SavePackageDescriptionToDebugDump(const char *dump_dir_name, const ch
         dd_save_text(dd, FILENAME_PKG_VERSION, pkg_name->p_version);
         dd_save_text(dd, FILENAME_PKG_RELEASE, pkg_name->p_release);
         dd_save_text(dd, FILENAME_PKG_ARCH, pkg_name->p_arch);
+        dd_save_text(dd, FILENAME_PKG_VENDOR, pkg_name->p_vendor);
+
+        if (fingerprint)
+        {
+            /* 16 character + 3 spaces + 1 '\0' + 2 Bytes for errors :) */
+            char key_fingerprint[22] = {0};
+
+            /* The condition is just a defense against errors */
+            for (size_t i = 0, j = 0; j < sizeof(key_fingerprint) - 2; )
+            {
+                key_fingerprint[j++] = toupper(fingerprint[i++]);
+
+                if (fingerprint[i] == '\0')
+                    break;
+
+                if (!(i & (0x3)))
+                    key_fingerprint[j++] = ' ';
+            }
+
+            dd_save_text(dd, FILENAME_PKG_FINGERPRINT, key_fingerprint);
+        }
     }
 
     if (component)
         dd_save_text(dd, FILENAME_COMPONENT, component);
 
-    dd_close(dd);
-
  ret0:
     error = 0;
  ret:
-    free(cmdline);
-    free(executable);
-    free(rootdir);
-    free(package_short_name);
-    free_pkg_envra(pkg_name);
-    free(component);
+    if (dd)
+        dd_close(dd);
+
+    free_pkg_nevra(pkg_name);
 
     return error;
 }
@@ -402,15 +486,15 @@ int main(int argc, char **argv)
     };
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_STRING('d', NULL, &dump_dir_name, "DIR"     , _("Problem directory")),
         OPT_STRING('c', NULL, &conf_filename, "CONFFILE", _("Configuration file")),
         OPT_STRING('r', "chroot", &chroot,    "CHROOT"  , _("Use this directory as RPM root")),
         OPT_END()
     };
-    /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
+    /*unsigned opts =*/ libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
     log_notice("Loading settings");
     if (load_conf(conf_filename) != 0)

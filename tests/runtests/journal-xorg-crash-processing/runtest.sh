@@ -32,7 +32,7 @@ TEST="journal-xorg-crash-processing"
 PACKAGE="abrt"
 XORG_REQUIRED_FILES="kernel backtrace component executable os_info reason time
 type uuid duphash pkg_name pkg_arch pkg_epoch pkg_release pkg_version"
-EXAMPLES_PATH="../../../examples"
+EXAMPLES_PATH="../../examples"
 SYSLOG_IDENTIFIER="abrt-xorg-test"
 
 function test_single_crash
@@ -80,7 +80,7 @@ function test_single_crash
         rlAssertExists "$crash_PATH/$f"
     done
 
-    rlRun "abrt-cli rm $crash_PATH" 0 "Remove crash directory"
+    remove_problem_directory
 
     # Kill the dumper with TERM to verify that it can store its state.
     # Next time, the dumper should start following the journald from
@@ -116,7 +116,7 @@ rlJournalStart
         rlRun "systemctl stop abrt-xorg"
 
         # The stored cursor is not valid in testing configuration.
-        rlRun "rm -rf /var/lib/abrt/abrt-dupm-journal-xorg.state"
+        rlRun "rm -rf /var/lib/abrt/abrt-dump-journal-xorg.state"
     rlPhaseEnd
 
     rlPhaseStartTest "Xorg crashes"
@@ -127,7 +127,7 @@ rlJournalStart
 
     rlPhaseStartCleanup
         # Do not confuse the system dumper. The stored cursor is invalid in the default configuration.
-        rlRun "rm -rf /var/lib/abrt/abrt-dupm-journal-xorg.state"
+        rlRun "rm -rf /var/lib/abrt/abrt-dump-journal-xorg.state"
 
         rlBundleLogs abrt $(echo *_ls) $(echo *.log)
         rlRun "popd"

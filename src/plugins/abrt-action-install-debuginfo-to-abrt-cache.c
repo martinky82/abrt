@@ -54,28 +54,30 @@ int main(int argc, char **argv)
         OPT_e = 1 << 3,
         OPT_r = 1 << 4,
         OPT_s = 1 << 5,
+        OPT_R = 1 << 6,
     };
 
     const char *build_ids = "build_ids";
     const char *exact = NULL;
     const char *repo = NULL;
     const char *size_mb = NULL;
+    const char *releasever = NULL;
 
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_BOOL  ('y', "yes",         NULL,                   _("Noninteractive, assume 'Yes' to all questions")),
         OPT_STRING('i', "ids",   &build_ids, "BUILD_IDS_FILE", _("- means STDIN, default: build_ids")),
         OPT_STRING('e', "exact",     &exact, "EXACT",          _("Download only specified files")),
         OPT_STRING('r', "repo",       &repo, "REPO",           _("Pattern to use when searching for repos, default: *debug*")),
         OPT_STRING('s', "size_mb", &size_mb, "SIZE_MB",        _("Ignored option")),
+        OPT_STRING('R', "releasever", &releasever, "RELEASEVER", _("OS release version")),
         OPT_END()
     };
-    const unsigned opts = parse_opts(argc, argv, program_options, program_usage_string);
+    const unsigned opts = libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
     const gid_t egid = getegid();
     const gid_t rgid = getgid();
     const uid_t euid = geteuid();
-    const gid_t ruid = getuid();
 
     /* We need to open the build ids file under the caller's UID/GID to avoid
      * information disclosures when reading files with changed UID.
@@ -90,22 +92,16 @@ int main(int argc, char **argv)
         if (setregid(egid, rgid) < 0)
             perror_msg_and_die("setregid(egid, rgid)");
 
-        if (setreuid(euid, ruid) < 0)
-            perror_msg_and_die("setreuid(euid, ruid)");
-
         const int build_ids_fd = open(build_ids, O_RDONLY);
 
         if (setregid(rgid, egid) < 0)
             perror_msg_and_die("setregid(rgid, egid)");
 
-        if (setreuid(ruid, euid) < 0 )
-            perror_msg_and_die("setreuid(ruid, euid)");
-
         if (build_ids_fd < 0)
             perror_msg_and_die("Failed to open file '%s'", build_ids);
 
         /* We are not going to free this memory. There is no place to do so. */
-        build_ids_self_fd = xasprintf("/proc/self/fd/%d", build_ids_fd);
+        build_ids_self_fd = g_strdup_printf("/proc/self/fd/%d", build_ids_fd);
     }
 
     char tmp_directory[] = LARGE_DATA_TMP_DIR"/abrt-tmp-debuginfo.XXXXXX";
@@ -114,16 +110,16 @@ int main(int argc, char **argv)
 
     log_info("Created working directory: %s", tmp_directory);
 
-    /* name, -v, --ids, -, -y, -e, EXACT, -r, REPO, -t, PATH, --, NULL */
-    const char *args[13];
+    /* name, -v, --ids, -, -y, -e, EXACT, -r, REPO, -t, PATH, --releaseve, VER, --, NULL */
+    const char *args[15];
     {
         const char *verbs[] = { "", "-v", "-vv", "-vvv" };
         unsigned i = 0;
         args[i++] = EXECUTABLE;
         args[i++] = "--ids";
         args[i++] = (build_ids_self_fd != NULL) ? build_ids_self_fd : "-";
-        if (g_verbose > 0)
-            args[i++] = verbs[g_verbose <= 3 ? g_verbose : 3];
+        if (libreport_g_verbose > 0)
+            args[i++] = verbs[libreport_g_verbose <= 3 ? libreport_g_verbose : 3];
         if ((opts & OPT_y))
             args[i++] = "-y";
         if ((opts & OPT_e))
@@ -136,6 +132,11 @@ int main(int argc, char **argv)
             args[i++] = "--repo";
             args[i++] = repo;
         }
+        if ((opts & OPT_R))
+        {
+            args[i++] = "--releasever";
+            args[i++] = releasever;
+        }
         args[i++] = "--tmpdir";
         args[i++] = tmp_directory;
         args[i++] = "--";
@@ -147,12 +148,10 @@ int main(int argc, char **argv)
      */
     /* do setregid only if we have to, to not upset selinux needlessly */
     if (egid != rgid)
-        IGNORE_RESULT(setregid(egid, egid));
-    if (euid != ruid)
     {
-        IGNORE_RESULT(setreuid(euid, euid));
-        /* We are suid'ed! */
-        /* Prevent malicious user from messing up with suid'ed process: */
+        IGNORE_RESULT(setregid(egid, egid));
+        /* We are sgid'ed! */
+        /* Prevent malicious user from messing up with sgid'ed process: */
 #if 1
 // We forgot to sanitize PYTHONPATH. And who knows what else we forgot
 // (especially considering *future* new variables of this kind).
@@ -169,7 +168,7 @@ int main(int argc, char **argv)
         char *p = NULL;
         for (size_t i = 0; i < wlsize; i++)
             if ((p = getenv(whitelist[i])) != NULL)
-                setlist[i] = xstrdup(p);
+                setlist[i] = g_strdup(p);
 
         // Now we can clear the environment
         clearenv();
@@ -178,7 +177,7 @@ int main(int argc, char **argv)
         for (size_t i = 0; i < wlsize; i++)
             if (setlist[i] != NULL)
             {
-                xsetenv(whitelist[i], setlist[i]);
+                g_setenv(whitelist[i], setlist[i], TRUE);
                 free(setlist[i]);
             }
 #else
@@ -223,7 +222,7 @@ int main(int argc, char **argv)
     }
 
     int status;
-    if (safe_waitpid(pid, &status, 0) < 0)
+    if (libreport_safe_waitpid(pid, &status, 0) < 0)
         perror_msg_and_die("waitpid");
 
     if (rmdir(tmp_directory) >= 0)

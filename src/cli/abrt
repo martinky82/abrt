@@ -1,0 +1,49 @@
+#!/usr/bin/python3
+
+from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+import sys
+
+import argcomplete
+
+from abrtcli import cli, config, i18n
+from abrtcli.i18n import _
+
+if __name__ == '__main__':
+    i18n.init()
+
+    parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter,
+                            allow_abbrev=False)
+
+    parser.add_argument('-a', '--authenticate',
+                        action='store_true',
+                        help=_('authenticate COMMAND for access to all problems'))
+    parser.add_argument('-v', '--version',
+                        action='version',
+                        version=config.VERSION)
+
+    subparsers = parser.add_subparsers(metavar='COMMAND')
+
+    cli.load_commands(subparsers)
+
+    argcomplete.autocomplete(parser)
+
+    try:
+        arguments = sys.argv[1:]
+        if not arguments:
+            arguments = ['list', '--pretty=oneline']
+        namespace = parser.parse_args(args=arguments)
+
+        if cli.wildcard_assumed(namespace):
+            arguments.extend('*')
+            namespace = parser.parse_args(args=arguments)
+
+        if "func" in namespace:
+            namespace.func(namespace)
+        else:
+            parser.print_usage()
+    except KeyboardInterrupt:
+        sys.exit(1)
+
+    sys.exit(0)
+else:
+    raise NotImplementedError

@@ -43,8 +43,8 @@ rlJournalStart
         pushd $TmpDir
 
         generate_crash
-        get_crash_path
         wait_for_hooks
+        get_crash_path
     rlPhaseEnd
 
     rlPhaseStartTest
@@ -63,7 +63,7 @@ rlJournalStart
         rlRun "rm -r $TmpDir" 0 "Removing tmp directory"
         rlRun "rm /etc/libreport/events.d/test_event_lr.conf" 0 "Removing test event config"
         rlRun "rm /etc/libreport/events/test_event_lr.xml"    0 "Removing test event config"
-        rlRun "abrt-cli rm $crash_PATH"
+        remove_problem_directory
     rlPhaseEnd
     rlJournalPrintText
 rlJournalEnd

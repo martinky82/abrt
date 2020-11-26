@@ -17,9 +17,11 @@
     51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 */
 #include <paths.h>
+#include <glib/gstdio.h>
 #include "libabrt.h"
 
 #define XORG_CONF "xorg.conf"
+#define XORG_DEFAULT_BLACKLISTED_MODULES "fglrx, nvidia, vboxvideo"
 
 static
 void trim_spaces(char *str)
@@ -43,11 +45,10 @@ char* is_in_comma_separated_list_with_fmt(const char *value, const char *fmt, co
     while (*list)
     {
         const char *comma = strchrnul(list, ',');
-        char *pattern = xasprintf(fmt, (int)(comma - list), list);
+        g_autofree char *pattern = g_strdup_printf(fmt, (int)(comma - list), list);
         char *match = strstr(value, pattern);
-        free(pattern);
         if (match)
-            return xstrndup(list, comma - list);
+            return g_strndup(list, comma - list);
         if (!*comma)
             break;
         list = comma + 1;
@@ -80,47 +81,70 @@ int main(int argc, char **argv)
     };
     /* Keep enum above and order of options below in sync! */
     struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
+        OPT__VERBOSE(&libreport_g_verbose),
         OPT_STRING('d', NULL, &dump_dir_name, "DIR", _("Problem directory")),
         OPT_END()
     };
-    /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
+    /*unsigned opts =*/ libreport_parse_opts(argc, argv, program_options, program_usage_string);
 
-    export_abrt_envvars(0);
+    libreport_export_abrt_envvars(0);
 
-    map_string_t *settings = new_map_string();
+    g_autoptr(GHashTable) settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     log_notice("Loading settings from '%s'", XORG_CONF);
-    load_abrt_plugin_conf_file(XORG_CONF, settings);
+    abrt_load_abrt_plugin_conf_file(XORG_CONF, settings);
     log_debug("Loaded '%s'", XORG_CONF);
-    char *BlacklistedXorgModules = xstrdup(get_map_string_item_or_empty(settings, "BlacklistedXorgModules"));
+
+    const char *value = g_hash_table_lookup(settings, "BlacklistedXorgModules");
+    if (!value)
+        value = XORG_DEFAULT_BLACKLISTED_MODULES;
+
+    char *BlacklistedXorgModules = g_strdup(value);
+
     trim_spaces(BlacklistedXorgModules);
-    free_map_string(settings);
 
     struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
     if (!dd)
         return 1;
 
-    char *backtrace = dd_load_text(dd, FILENAME_BACKTRACE);
-    char *xorg_log = dd_load_text_ext(dd, "Xorg.0.log", DD_FAIL_QUIETLY_ENOENT);
-    char *blacklisted = is_in_comma_separated_list_with_fmt(backtrace, "/%.*s", BlacklistedXorgModules);
+    g_autofree char *backtrace = dd_load_text(dd, FILENAME_BACKTRACE);
+    g_autofree char *xorg_log = dd_load_text_ext(dd, "Xorg.0.log", DD_FAIL_QUIETLY_ENOENT);
+    g_autofree char *blacklisted = is_in_comma_separated_list_with_fmt(backtrace, "/%.*s", BlacklistedXorgModules);
     if (!blacklisted)
         blacklisted = is_in_comma_separated_list_with_fmt(xorg_log, "LoadModule: \"%.*s\"", BlacklistedXorgModules);
-    free(backtrace);
-    free(xorg_log);
+
+    /* get and save crash_function */
+    /* xorg backtrace is extracted from journal and looks like:
+     * 0: /usr/libexec/Xorg (OsLookupColor+0x139) [0x59ab89]
+     * 1: /lib64/libc.so.6 (__restore_rt+0x0) [0x7f2b13545b1f]
+     * 2: /lib64/libc.so.6 (__select_nocancel+0xa) [0x7f2b13609e7a]
+     * 3: /usr/libexec/Xorg (WaitForSomething+0x1c8) [0x593568]
+     * 4: /usr/libexec/Xorg (SendErrorToClient+0x111) [0x43a3a1]
+     */
+    char *crash_function = strchr(backtrace, '(');
+    if (crash_function++)
+    {
+        char *end = strchr(crash_function, '+');
+        if (end)
+            *end = '\0';
+        else
+        {
+            end = strchr(crash_function, ')');
+            *end = '\0';
+        }
+        dd_save_text(dd, FILENAME_CRASH_FUNCTION, crash_function);
+    }
 
     if (blacklisted)
     {
-        char *foobared = xasprintf(_("Module '%s' was loaded - won't report this crash"), blacklisted);
-        free(blacklisted);
+        g_autofree char *foobared = g_strdup_printf(_("Module '%s' was loaded - won't report this crash"), blacklisted);
         dd_save_text(dd, FILENAME_NOT_REPORTABLE, foobared);
-        free(foobared);
         dd_close(dd);
         return 0;
     }
 
     dd_close(dd);
 
-    xchdir(dump_dir_name);
+    g_chdir(dump_dir_name);
 
     /* Get ready for extremely ugly sight.
      *

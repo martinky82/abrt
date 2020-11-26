@@ -19,7 +19,10 @@
 #include <satyr/stacktrace.h>
 #include <satyr/thread.h>
 
+#include <errno.h>
+#include <limits.h>
 #include <regex.h>
+#include <string.h>
 
 #define _GNU_SOURCE 1 /* for strcasestr */
 #include "libabrt.h"
@@ -42,13 +45,13 @@ static void record_oops(GList **oops_list, const struct abrt_koops_line_info* li
     /* too short oopses are invalid */
     if (len > SANE_MIN_OOPS_LEN)
     {
-        char *oops = (char*)xzalloc(len);
+        g_autofree char *oops = (char*)g_malloc0(len);
         char *dst = oops;
-        char *version = NULL;
+        g_autofree char *version = NULL;
         for (q = oopsstart; q <= oopsend; q++)
         {
             if (!version)
-                version = koops_extract_version(lines_info[q].ptr);
+                version = abrt_koops_extract_version(lines_info[q].ptr);
             if (lines_info[q].ptr[0])
             {
                 dst = stpcpy(dst, lines_info[q].ptr);
@@ -59,7 +62,7 @@ static void record_oops(GList **oops_list, const struct abrt_koops_line_info* li
         {
             *oops_list = g_list_append(
                         *oops_list,
-                        xasprintf("%s\n%s", (version ? version : ""), oops)
+                        g_strdup_printf("%s\n%s", (version ? version : ""), oops)
             );
         }
         else
@@ -67,11 +70,9 @@ static void record_oops(GList **oops_list, const struct abrt_koops_line_info* li
             /* too short oopses are invalid */
             rv = 0;
         }
-        free(oops);
-        free(version);
     }
 
-    VERB3 if (rv == 0) log("Dropped oops: too short");
+    VERB3 if (rv == 0) log_warning("Dropped oops: too short");
 }
 
 /* In some comparisons, we skip 1st letter, to avoid dealing with
@@ -101,6 +102,7 @@ static const char *const s_koops_suspicious_strings[] = {
     /*s*/"ysctl table check failed",
     ": nobody cared",
     "IRQ handler type mismatch",
+    "Kernel panic - not syncing:",
     /*
      * MCE examples for various CPUs/architectures (collected 2013-04):
      * arch/arc/kernel/traps.c:			die("Machine Check Exception", regs, address, cause);
@@ -138,7 +140,7 @@ static const char *const s_koops_suspicious_strings[] = {
     "coprocessor segment overrun:",
     "invalid TSS:",
     "segment not present:",
-    "invalid opcode:",
+    "invalid opcode",
     "alignment check:",
     "stack segment:",
     "fpu exception:",
@@ -149,15 +151,50 @@ static const char *const s_koops_suspicious_strings[] = {
     NULL
 };
 
-void koops_print_suspicious_strings(void)
+static const char *const s_koops_suspicious_strings_blacklist[] = {
+    /* "BUG:" and "DEBUG:" overlaps, we don't want to recognize DEBUG messages as BUG */
+    "DEBUG:",
+
+    /* Termination */
+    NULL
+};
+
+static bool suspicious_line(const char *line)
 {
-    koops_print_suspicious_strings_filtered(NULL);
+    const char *const *str = s_koops_suspicious_strings;
+    for ( ; *str; ++str)
+        if (strstr(line, *str))
+            break;
+
+    if (!*str)
+        return false;
+
+    str = s_koops_suspicious_strings_blacklist;
+    for ( ; *str; ++str)
+        if (strstr(line, *str))
+           break;
+
+    return !*str;
 }
 
-GList *koops_suspicious_strings_list(void)
+void abrt_koops_print_suspicious_strings(void)
+{
+    abrt_koops_print_suspicious_strings_filtered(NULL);
+}
+
+GList *abrt_koops_suspicious_strings_list(void)
 {
     GList *strings = NULL;
     for (const char *const *str = s_koops_suspicious_strings; *str; ++str)
+        strings = g_list_prepend(strings, (gpointer)*str);
+
+    return strings;
+}
+
+GList *abrt_koops_suspicious_strings_blacklist(void)
+{
+    GList *strings = NULL;
+    for (const char *const *str = s_koops_suspicious_strings_blacklist; *str; ++str)
         strings = g_list_prepend(strings, (gpointer)*str);
 
     return strings;
@@ -182,7 +219,7 @@ static bool match_any(const regex_t **res, const char *str)
     return false;
 }
 
-void koops_print_suspicious_strings_filtered(const regex_t **filterout)
+void abrt_koops_print_suspicious_strings_filtered(const regex_t **filterout)
 {
     for (const char *const *str = s_koops_suspicious_strings; *str; ++str)
     {
@@ -192,7 +229,7 @@ void koops_print_suspicious_strings_filtered(const regex_t **filterout)
 }
 
 
-void koops_line_skip_jiffies(const char **c)
+void abrt_koops_line_skip_jiffies(const char **c)
 {
     /* remove jiffies time stamp counter if present
      * jiffies are unsigned long, so it can be 2^64 long, which is
@@ -211,7 +248,7 @@ void koops_line_skip_jiffies(const char **c)
     }
 }
 
-int koops_line_skip_level(const char **c)
+int abrt_koops_line_skip_level(const char **c)
 {
     int linelevel = 0;
     if (**c == '<')
@@ -236,12 +273,39 @@ int koops_line_skip_level(const char **c)
     return linelevel;
 }
 
-void koops_extract_oopses(GList **oops_list, char *buffer, size_t buflen)
+void abrt_koops_extract_oopses(GList **oops_list, char *buffer, size_t buflen)
 {
+    char hostname[HOST_NAME_MAX + 1] = { 0 };
+    g_autofree char *long_needle = NULL;
+    char *hostname_dot;
+    g_autofree char *short_needle = NULL;
     char *c;
     int linecount = 0;
     int lines_info_size = 0;
     struct abrt_koops_line_info *lines_info = NULL;
+
+    if (gethostname(hostname, sizeof(hostname)) == -1)
+    {
+        if (ENAMETOOLONG == errno)
+        {
+            /* Pure paranoia, since gethostname() truncates the hostname
+             * if the specified length is not enough to fit the entire thing
+             * and does not guarantee null-termination.
+             *
+             * Would only apply to extremely non-compliant systems, where
+             * HOST_NAME_MAX is just a suggestion.
+             */
+            g_return_if_reached();
+        }
+    }
+
+    long_needle = g_strdup_printf(" %s kernel: ", hostname);
+    hostname_dot = strchr(hostname, '.');
+    if (NULL != hostname_dot)
+    {
+        *hostname_dot = '\0';
+    }
+    short_needle = g_strdup_printf(" %s kernel: ", hostname);
 
     /* Split buffer into lines */
 
@@ -293,21 +357,27 @@ void koops_extract_oopses(GList **oops_list, char *buffer, size_t buflen)
                     free(lines_info);
                     lines_info = NULL;
                     lines_info_size = 0;
-                    list_free_with_free(*oops_list);
-                    *oops_list = NULL;
+                    g_list_free_full(g_steal_pointer(oops_list), free);
                 }
                 goto next_line;
             }
+
+            /* check if the machine hostname is contained in the message hostname */
+            if (hostname[0] != '\0' && !strstr(c, short_needle) && !strstr(c, long_needle))
+            {
+                goto next_line;
+            }
+
             c = kernel_str + sizeof("kernel: ")-1;
         }
 
         /* store and remove kernel log level */
-        linelevel = koops_line_skip_level((const char **)&c);
-        koops_line_skip_jiffies((const char **)&c);
+        linelevel = abrt_koops_line_skip_level((const char **)&c);
+        abrt_koops_line_skip_jiffies((const char **)&c);
 
         if ((lines_info_size & 0xfff) == 0)
         {
-            lines_info = xrealloc(lines_info, (lines_info_size + 0x1000) * sizeof(lines_info[0]));
+            lines_info = g_realloc(lines_info, (lines_info_size + 0x1000) * sizeof(lines_info[0]));
         }
         lines_info[lines_info_size].ptr = c;
         lines_info[lines_info_size].level = linelevel;
@@ -316,11 +386,11 @@ next_line:
         c = c9 + 1;
     }
 
-    koops_extract_oopses_from_lines(oops_list, lines_info, lines_info_size);
+    abrt_koops_extract_oopses_from_lines(oops_list, lines_info, lines_info_size);
     free(lines_info);
 }
 
-void koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_line_info *lines_info, int lines_info_size)
+void abrt_koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_line_info *lines_info, int lines_info_size)
 {
     /* Analyze lines */
 
@@ -328,6 +398,11 @@ void koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_
     char prevlevel = 0;
     int oopsstart = -1;
     int inbacktrace = 0;
+    regex_t arm_regex;
+    int arm_regex_rc = 0;
+
+    /* ARM backtrace regex, match a string similar to r7:df912310 */
+    arm_regex_rc = regcomp(&arm_regex, "r[[:digit:]]{1,}:[a-f[:digit:]]{8}", REG_EXTENDED | REG_NOSUB);
 
     i = 0;
     while (i < lines_info_size)
@@ -345,14 +420,8 @@ void koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_
         if (oopsstart < 0)
         {
             /* Find start-of-oops markers */
-            for (const char *const *str = s_koops_suspicious_strings; *str; ++str)
-            {
-                if (strstr(curline, *str))
-                {
-                    oopsstart = i;
-                    break;
-                }
-            }
+            if (suspicious_line(curline))
+                oopsstart = i;
 
             if (oopsstart >= 0)
             {
@@ -387,7 +456,7 @@ void koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_
              * In order to capture all these lines, we treat final line
              * as "backtrace" (which is admittedly a hack):
              */
-            if (strstr(curline, "Kernel panic - not syncing"))
+            if (strstr(curline, "Kernel panic - not syncing:") && strcasestr(curline, "Machine check"))
                 inbacktrace = 1;
             else
             if (strnlen(curline, 9) > 8
@@ -418,12 +487,17 @@ void koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_
              && !strstr(curline, "<EOI>")
              && !strstr(curline, "<NMI>")
              && !strstr(curline, "<<EOE>>")
+             && !strstr(curline, "Comm:")
+             && !strstr(curline, "Hardware name:")
+             && !strstr(curline, "Backtrace:")
              && strncmp(curline, "Code: ", 6) != 0
              && strncmp(curline, "RIP ", 4) != 0
              && strncmp(curline, "RSP ", 4) != 0
              /* s390 Call Trace ends with 'Last Breaking-Event-Address:'
               * which is followed by a single frame */
              && strncmp(curline, "Last Breaking-Event-Address:", strlen("Last Breaking-Event-Address:")) != 0
+             /* ARM dumps registers intertwined with the backtrace */
+             && (arm_regex_rc == 0 ? regexec(&arm_regex, curline, 0, NULL, 0) == REG_NOMATCH : 1)
             ) {
                 oopsend = i-1; /* not a call trace line */
             }
@@ -438,18 +512,9 @@ void koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_
             /* kernel end-of-oops marker (not including marker itself) */
             else if (strstr(curline, "---[ end trace"))
                 oopsend = i-1;
-            else
-            {
-                /* if a new oops starts, this one has ended */
-                for (const char *const *str = s_koops_suspicious_strings; *str; ++str)
-                {
-                    if (strstr(curline, *str))
-                    {
-                        oopsend = i-1;
-                        break;
-                    }
-                }
-            }
+            /* if a new oops starts, this one has ended */
+            else if (suspicious_line(curline))
+                oopsend = i-1;
 
             if (oopsend <= i)
             {
@@ -489,6 +554,8 @@ void koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_
         }
     } /* while (i < lines_info_size) */
 
+    regfree(&arm_regex);
+
     /* process last oops if we have one */
     if (oopsstart >= 0)
     {
@@ -505,18 +572,17 @@ void koops_extract_oopses_from_lines(GList **oops_list, const struct abrt_koops_
         }
     }
 }
-int koops_hash_str_ext(char result[SHA1_RESULT_LEN*2 + 1], const char *oops_buf, int frame_count, int duphash_flags)
+
+char *abrt_koops_hash_str_ext(const char *oops_buf, int frame_count, int duphash_flags)
 {
-    char *hash_str = NULL, *error = NULL;
-    int bad = 0;
+    g_autofree char *error = NULL;
+    char *digest = NULL;
 
     struct sr_stacktrace *stacktrace = sr_stacktrace_parse(SR_REPORT_KERNELOOPS,
                                                            oops_buf, &error);
     if (!stacktrace)
     {
         log_debug("Failed to parse koops: %s", error);
-        free(error);
-        bad = 1;
         goto end;
     }
 
@@ -524,46 +590,37 @@ int koops_hash_str_ext(char result[SHA1_RESULT_LEN*2 + 1], const char *oops_buf,
     if (!thread)
     {
         log_debug("Failed to find crash thread");
-        bad = 1;
         goto end;
     }
 
-    if (g_verbose >= 3)
+    if (libreport_g_verbose >= 3)
     {
-        hash_str = sr_thread_get_duphash(thread, frame_count, NULL,
-                                         duphash_flags|SR_DUPHASH_NOHASH);
-        if (hash_str)
-            log("Generating duphash: '%s'", hash_str);
+        digest = sr_thread_get_duphash(thread, frame_count, NULL,
+                                       duphash_flags|SR_DUPHASH_NOHASH);
+        if (digest)
+        {
+            log_warning("Generating duphash: '%s'", digest);
+            free(digest);
+        }
         else
-            log("Nothing useful for duphash");
-
-
-        free(hash_str);
+            log_warning("Nothing useful for duphash");
     }
 
-    hash_str = sr_thread_get_duphash(thread, frame_count, NULL, duphash_flags);
-    if (hash_str)
-    {
-        strncpy(result, hash_str, SHA1_RESULT_LEN*2);
-        result[SHA1_RESULT_LEN*2] = '\0';
-        free(hash_str);
-    }
-    else
-        bad = 1;
+    digest = sr_thread_get_duphash(thread, frame_count, NULL, duphash_flags);
 
 end:
     sr_stacktrace_free(stacktrace);
-    return bad;
+    return digest;
 }
 
-int koops_hash_str(char result[SHA1_RESULT_LEN*2 + 1], const char *oops_buf)
+char *abrt_koops_hash_str(const char *oops_buf)
 {
     const int frame_count = 6;
     const int duphash_flags = SR_DUPHASH_NONORMALIZE|SR_DUPHASH_KOOPS_COMPAT;
-    return koops_hash_str_ext(result, oops_buf, frame_count, duphash_flags);
+    return abrt_koops_hash_str_ext(oops_buf, frame_count, duphash_flags);
 }
 
-char *koops_extract_version(const char *linepointer)
+char *abrt_koops_extract_version(const char *linepointer)
 {
     if (strstr(linepointer, "Pid")
      || strstr(linepointer, "comm")
@@ -571,7 +628,10 @@ char *koops_extract_version(const char *linepointer)
      || strstr(linepointer, "REGS")
      || strstr(linepointer, "EFLAGS")
     ) {
-        const char *regexp = "([0-9]+\\.[0-9]+\\.[0-9]+-[^ \\)]+)[ \\)]";
+        /* "(4.7.0-2.x86_64.fc25) #"    */
+        /* " 4.7.0-2.x86_64.fc25 #"     */
+        /* " 2.6.3.4.5-2.x86_64.fc22 #" */
+        const char *regexp = "([ \\(]|kernel-)([0-9]+\\.[0-9]+\\.[0-9]+(\\.[^.-]+)*-[^ \\)]+)\\)? #";
         regex_t re;
         int r = regcomp(&re, regexp, REG_EXTENDED);
         if (r != 0)
@@ -582,8 +642,8 @@ char *koops_extract_version(const char *linepointer)
             return NULL;
         }
 
-        regmatch_t matchptr[2];
-        r = regexec(&re, linepointer, 2, matchptr, 0);
+        regmatch_t matchptr[3];
+        r = regexec(&re, linepointer, sizeof(matchptr)/sizeof(matchptr[0]), matchptr, 0);
         if (r != 0)
         {
             if (r != REG_NOMATCH)
@@ -602,7 +662,11 @@ char *koops_extract_version(const char *linepointer)
             return NULL;
         }
 
-        char *ret = xstrndup(linepointer + matchptr[1].rm_so, matchptr[1].rm_eo - matchptr[1].rm_so);
+        /* 0: entire string */
+        /* 1: version prefix */
+        /* 2: version string */
+        const regmatch_t *const ver = matchptr + 2;
+        char *ret = g_strndup(linepointer + ver->rm_so, ver->rm_eo - ver->rm_so);
 
         regfree(&re);
         return ret;
@@ -642,21 +706,7 @@ char *koops_extract_version(const char *linepointer)
  *  'T' - Tech_preview
  */
 
-#if 0 /* unused */
-static char *turn_off_flag(char *flags, char flag)
-{
-    size_t len = strlen(flags);
-    for (int i = 0; i < len; ++i)
-    {
-        if (flags[i] == flag)
-            flags[i] = ' ';
-    }
-
-    return flags;
-}
-#endif
-
-char *kernel_tainted_short(const char *kernel_bt)
+char *abrt_kernel_tainted_short(const char *kernel_bt)
 {
     /* example of flags: 'Tainted: G    B       ' */
     char *tainted = strstr(kernel_bt, "Tainted: ");
@@ -669,7 +719,7 @@ char *kernel_tainted_short(const char *kernel_bt)
     /* 26 the maximal sane count of flags because of alphabet limits */
     unsigned sz = 26 + 1;
     unsigned cnt = 0;
-    char *tnt = xmalloc(sz);
+    char *tnt = g_malloc(sz);
 
     for (;;)
     {
@@ -679,7 +729,7 @@ char *kernel_tainted_short(const char *kernel_bt)
             {   /* this should not happen but */
                 /* I guess, it's a bit better approach than simple failure */
                 sz <<= 1;
-                tnt = xrealloc(tnt, sizeof(char) * sz);
+                tnt = g_realloc(tnt, sizeof(char) * sz);
             }
 
             tnt[cnt] = tainted[0];
@@ -707,9 +757,10 @@ static const char *const tnts_long[] = {
     /* B */ "System has hit bad_page.",
     /* C */ "Modules from drivers/staging are loaded.",
     /* D */ "Kernel has oopsed before",
-    /* E */ "Unsigned module has been loaded."
+    /* E */ "Unsigned module has been loaded.",
     /* F */ "Module has been forcibly loaded.",
-    /* G */ "Proprietary module has not been loaded.",
+            /* We don't want to be more descriptive about G flag */
+    /* G */ NULL, /* "Proprietary module has not been loaded." */
     /* H */ NULL,
     /* I */ "Working around severe firmware bug.",
     /* J */ NULL,
@@ -731,9 +782,9 @@ static const char *const tnts_long[] = {
     /* Z */ NULL,
 };
 
-char *kernel_tainted_long(const char *tainted_short)
+char *abrt_kernel_tainted_long(const char *tainted_short)
 {
-    struct strbuf *tnt_long = strbuf_new();
+    GString *tnt_long = g_string_new(NULL);
     while (tainted_short[0] != '\0')
     {
         const int tnt_index = tainted_short[0] - 'A';
@@ -741,12 +792,12 @@ char *kernel_tainted_long(const char *tainted_short)
         {
             const char *const txt = tnts_long[tnt_index];
             if (txt)
-                strbuf_append_strf(tnt_long, "%s\n", txt);
+                g_string_append_printf(tnt_long, "%c - %s\n", tainted_short[0], txt);
         }
 
         ++tainted_short;
     }
 
-    return strbuf_free_nobuf(tnt_long);
+    return g_string_free(tnt_long, FALSE);
 }
 

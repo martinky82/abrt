@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 import json
 import sys
@@ -39,14 +39,14 @@ if core_backtrace['executable'] in expected:
 
 for (i, frame) in enumerate(trace):
     if core_backtrace['executable'] in expected:
-        assert frame['function_name'] == expected[core_backtrace['executable']][i]
+        assert expected[core_backtrace['executable']][i] in frame['function_name']
 
     assert isinstance(frame['address'], int)
-    assert isinstance(frame['build_id'], unicode)
+    assert isinstance(frame['build_id'], str)
     assert isinstance(frame['build_id_offset'], int)
-    assert isinstance(frame['file_name'], unicode)
+    assert isinstance(frame['file_name'], str)
     assert (os.path.basename(core_backtrace['executable']) in frame['file_name']
         or 'libwillcrash' in frame['file_name']
         or 'libc' in frame['file_name'])
 
-print 'OK'
+print('OK')

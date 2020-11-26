@@ -21,7 +21,34 @@
 
 int main(int argc, char **argv)
 {
-    /* I18n */
+    const char *dump_directory = ".";
+    const GOptionEntry option_entries[] =
+    {
+        {
+            "verbose",
+            'v',
+            G_OPTION_FLAG_NONE,
+            G_OPTION_ARG_NONE, &libreport_g_verbose,
+            "Be verbose",
+            NULL,
+        },
+        {
+            "directory",
+            'd',
+            G_OPTION_FLAG_NONE,
+            G_OPTION_ARG_FILENAME, &dump_directory,
+            "Problem directory",
+            "DIR",
+        },
+        { NULL, },
+    };
+    g_autoptr(GOptionContext) option_context = NULL;
+    g_autoptr(GError) error = NULL;
+    struct dump_dir *dd;
+    g_autoptr(GHashTable) settings = NULL;
+    g_autofree char *oops = NULL;
+    g_autofree char *hash_str = NULL;
+
     setlocale(LC_ALL, "");
 #if ENABLE_NLS
     bindtextdomain(PACKAGE, LOCALEDIR);
@@ -30,54 +57,47 @@ int main(int argc, char **argv)
 
     abrt_init(argv);
 
-    const char *dump_dir_name = ".";
+    option_context = g_option_context_new (NULL);
 
-    /* Can't keep these strings/structs static: _() doesn't support that */
-    const char *program_usage_string = _(
-        "& [-v] -d DIR\n"
-        "\n"
-        "Calculates and saves UUID and DUPHASH for oops problem directory DIR"
-        );
-    enum {
-        OPT_v = 1 << 0,
-        OPT_d = 1 << 1,
-    };
-    /* Keep enum above and order of options below in sync! */
-    struct options program_options[] = {
-        OPT__VERBOSE(&g_verbose),
-        OPT_STRING('d', NULL, &dump_dir_name, "DIR", _("Problem directory")),
-        OPT_END()
-    };
-    /*unsigned opts =*/ parse_opts(argc, argv, program_options, program_usage_string);
-
-    export_abrt_envvars(0);
-
-    struct dump_dir *dd = dd_opendir(dump_dir_name, /*flags:*/ 0);
-    if (!dd)
-        return 1;
-
-    map_string_t *settings = new_map_string();
-    load_abrt_plugin_conf_file("oops.conf", settings);
-
-    char *oops = dd_load_text(dd, FILENAME_BACKTRACE);
-    char hash_str[SHA1_RESULT_LEN*2 + 1];
-    int bad = koops_hash_str(hash_str, oops);
-    if (bad)
+    g_option_context_add_main_entries(option_context, option_entries, PACKAGE);
+    g_option_context_set_summary(option_context,
+                                 _("Calculates and saves UUID and DUPHASH for oops problem directory DIR"));
+    if (!g_option_context_parse(option_context, &argc, &argv, &error))
     {
-        error_msg("Can't find a meaningful backtrace for hashing in '%s'", dump_dir_name);
+        error_msg("Parsing command-line options failed: %s", error->message);
+
+        return EXIT_FAILURE;
+    }
+
+    libreport_export_abrt_envvars(0);
+
+    dd = dd_opendir(dump_directory, /*flags:*/ 0);
+    if (NULL == dd)
+    {
+        return EXIT_FAILURE;
+    }
+    settings = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+
+    abrt_load_abrt_plugin_conf_file("oops.conf", settings);
+
+    oops = dd_load_text(dd, FILENAME_BACKTRACE);
+    hash_str = abrt_koops_hash_str(oops);
+    if (NULL == hash_str)
+    {
+        error_msg("Can't find a meaningful backtrace for hashing in '%s'", dump_directory);
 
         /* Do not drop such oopses by default. */
         int drop_notreportable_oopses = 0;
-        const int res = try_get_map_string_item_as_bool(settings,
+        const int res = libreport_try_get_map_string_item_as_bool(settings,
                 "DropNotReportableOopses", &drop_notreportable_oopses);
         if (!res || !drop_notreportable_oopses)
         {
             /* Let users know that they can configure ABRT to drop these oopses. */
-            log("Preserving oops '%s' because DropNotReportableOopses is 'no'", dump_dir_name);
+            log_warning("Preserving oops '%s' because DropNotReportableOopses is 'no'", dump_directory);
 
             dd_save_text(dd, FILENAME_NOT_REPORTABLE,
             _("The backtrace does not contain enough meaningful function frames "
-              "to be reported. It is annoying but it does not necessary "
+              "to be reported. It is annoying but it does not necessarily "
               "signalize a problem with your computer. ABRT will not allow "
               "you to create a report in a bug tracking system but you "
               "can contact kernel maintainers via e-mail.")
@@ -87,17 +107,14 @@ int main(int argc, char **argv)
             /* We need UUID file for the local duplicates look-up and DUPHASH */
             /* file is also useful because user can force ABRT to report */
             /* the oops into a bug tracking system (Bugzilla). */
-            bad = koops_hash_str_ext(hash_str, oops,
+            hash_str = abrt_koops_hash_str_ext(oops,
                     /* use no frame count limit */-1,
                     /* use every frame in stacktrace */0);
 
             /* If even this attempt fails, we can drop the oops without any hesitation. */
         }
     }
-
-    free(oops);
-
-    if (!bad)
+    if (NULL != hash_str)
     {
         dd_save_text(dd, FILENAME_UUID, hash_str);
         dd_save_text(dd, FILENAME_DUPHASH, hash_str);
@@ -105,7 +122,10 @@ int main(int argc, char **argv)
 
     dd_close(dd);
 
-    free_map_string(settings);
+    if (NULL == hash_str)
+    {
+        return EXIT_FAILURE;
+    }
 
-    return bad;
+    return EXIT_SUCCESS;
 }

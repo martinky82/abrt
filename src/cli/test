@@ -1,0 +1,9 @@
+#!/bin/bash
+
+which pytest-3 &> /dev/null
+if [ $? -ne 0 ]; then
+    echo 'python3-pytest package required'
+    exit 1
+fi
+
+pytest-3 --cov=abrtcli --capture=no --verbose tests/*.py

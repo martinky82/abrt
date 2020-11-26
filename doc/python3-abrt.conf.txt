@@ -1,0 +1,33 @@
+python3-abrt.conf(5)
+====================
+
+NAME
+----
+python3-abrt.conf - Configuration file for ABRT's python 3 crash hook
+
+SYNOPSIS
+--------
+/etc/abrt/plugins/python3.conf
+
+DESCRIPTION
+-----------
+Currently, only one item exists:
+
+*RequireAbsolutePath = 'yes/no'*::
+   If enabled, unhandled Python 3 exceptions will be caught and saved only
+   in scripts which are executed with absolute path in 'sys.argv[0]'.
+   +
+   Default is 'yes', i.e. do not save crashes of applications executed from
+   a relative path.
+
+FILES
+-----
+/etc/abrt/plugins/python3.conf
+
+SEE ALSO
+--------
+abrt.conf(5)
+
+AUTHORS
+-------
+* ABRT team

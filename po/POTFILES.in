@@ -1,8 +1,9 @@
 # [encoding: UTF-8]
 # List of source files containing translatable strings.
 # Please keep this file sorted alphabetically.
-src/applet/abrt-applet.desktop.in
-src/applet/applet.c
+src/applet/org.freedesktop.problems.applet.desktop.in
+src/applet/abrt-applet-application.c
+src/applet/abrt-applet-problem-info.c
 src/configuration-gui/abrt-config-widget.c
 src/configuration-gui/abrt-config-widget.glade
 src/configuration-gui/system-config-abrt.c
@@ -11,7 +12,7 @@ src/daemon/abrt-action-save-package-data.c
 src/daemon/abrt-action-save-container-data.c
 src/daemon/abrt-server.c
 src/dbus/abrt-dbus.c
-src/dbus/abrt-configuration.c
+src/dbus/abrt_problems2_service.c
 src/daemon/abrtd.c
 src/daemon/abrt-handle-event.c
 src/daemon/abrt-upload-watch.c
@@ -21,7 +22,6 @@ src/lib/abrt_conf.c
 src/lib/hooklib.c
 src/lib/problem_api.c
 src/lib/problem_api_dbus.c
-src/lib/ignored_problems.c
 src/plugins/abrt-action-analyze-backtrace.c
 src/plugins/abrt-action-analyze-c.c
 src/plugins/abrt-action-analyze-core.in
@@ -47,6 +47,7 @@ src/plugins/abrt-dump-journal-xorg.c
 src/plugins/abrt-dump-xorg.c
 src/plugins/abrt-journal.c
 src/plugins/abrt-retrace-client.c
+src/plugins/analyze_BodhiUpdates.xml.in
 src/plugins/analyze_LocalGDB.xml.in
 src/plugins/analyze_RetraceServer.xml.in
 src/plugins/collect_xsession_errors.xml.in
@@ -56,17 +57,20 @@ src/plugins/bodhi.c
 
 src/hooks/abrt-merge-pstoreoops.c
 
-src/cli/abrt-cli-core.c
-src/cli/abrt-cli.c
-src/cli/list.c
-src/cli/status.c
-src/cli/report.c
-src/cli/process.c
-src/cli/process.c
+src/cli/abrtcli/match.py
+src/cli/abrtcli/utils.py
 
-src/cli-ng/abrtcli/cli.py
-src/cli-ng/abrtcli/match.py
-src/cli-ng/abrtcli/utils.py
+src/cli/abrtcli/cli/__init__.py
+src/cli/abrtcli/cli/backtrace.py
+src/cli/abrtcli/cli/gdb.py
+src/cli/abrtcli/cli/info.py
+src/cli/abrtcli/cli/install_debuginfo.py
+src/cli/abrtcli/cli/list.py
+src/cli/abrtcli/cli/Makefile.am
+src/cli/abrtcli/cli/remove.py
+src/cli/abrtcli/cli/report.py
+src/cli/abrtcli/cli/retrace.py
+src/cli/abrtcli/cli/status.py
 
 src/plugins/analyze_CCpp.xml.in
 src/plugins/analyze_VMcore.xml.in
